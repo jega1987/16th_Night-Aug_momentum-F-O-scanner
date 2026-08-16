@@ -24,6 +24,26 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Index Squeeze Scanner", docs_url="/docs", redoc_url=None)
 templates = Jinja2Templates(directory="templates")
 
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """
+    Last resort. The per-section handling inside dashboard() is meant to catch
+    everything expected to go wrong, but this exists so that if something
+    outside that - a template error, a dependency failure - still slips
+    through, the person sees a plain diagnostic instead of Starlette's bare
+    "Internal Server Error" with no indication of what to check next.
+    """
+    logger.exception("[Dashboard] Unhandled error on %s %s", request.method, request.url.path)
+    return HTMLResponse(
+        f"<pre style='background:#11151b;color:#e4e8ec;padding:20px;"
+        f"font-family:ui-monospace,monospace;white-space:pre-wrap'>"
+        f"Something failed rendering this page.\n\n"
+        f"{type(exc).__name__}: {exc}\n\n"
+        f"Check Railway's Deploy Logs for the full traceback, or try /health "
+        f"to confirm the app itself is still running.</pre>",
+        status_code=500)
+
 OPEN_STATES = ("OPEN", "RUNNING")
 CLOSED_STATES = ("TP3", "SL", "TRAIL", "SQUAREOFF")
 
@@ -80,40 +100,73 @@ async def dashboard(request: Request,
                     token: Optional[str] = Query(default=None),
                     db: Session = Depends(get_db),
                     _=Depends(require_token)):
+    """
+    Every data source below is wrapped individually. The dashboard is a
+    read-only status page - if the equity universe query fails while indices
+    are fine, or a background job left one row malformed, the person looking
+    at this page needs to see everything else that DID work, not a blank
+    Internal Server Error with no way to tell what broke.
+    """
     tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    render_error: Optional[str] = None
 
-    snapshots = {}
-    for symbol in cfg.INDICES:
-        snap = (db.query(IndexSnapshot)
-                  .filter(IndexSnapshot.symbol == symbol)
-                  .order_by(IndexSnapshot.timestamp.desc())
-                  .first())
-        if snap:
-            snapshots[symbol] = snap
+    def safe(label: str, fn, default):
+        nonlocal render_error
+        try:
+            return fn()
+        except Exception as exc:
+            logger.error("[Dashboard] %s failed: %s", label, exc)
+            if render_error is None:
+                render_error = f"{label}: {exc}"
+            return default
 
-    squeeze_state = {}
-    for symbol in cfg.INDICES:
-        row = (db.query(ScanLog)
-                 .filter(ScanLog.symbol == symbol, ScanLog.timeframe == tf)
-                 .order_by(ScanLog.timestamp.desc())
-                 .first())
-        if row:
-            squeeze_state[symbol] = row
+    def load_snapshots():
+        out = {}
+        for symbol in cfg.INDICES:
+            snap = (db.query(IndexSnapshot)
+                      .filter(IndexSnapshot.symbol == symbol)
+                      .order_by(IndexSnapshot.timestamp.desc())
+                      .first())
+            if snap:
+                out[symbol] = snap
+        return out
 
-    today_signals = (db.query(Signal)
-                       .filter(Signal.timeframe == tf, Signal.timestamp >= today_start())
-                       .all())
+    def load_squeeze_state():
+        out = {}
+        for symbol in cfg.INDICES:
+            row = (db.query(ScanLog)
+                     .filter(ScanLog.symbol == symbol, ScanLog.timeframe == tf)
+                     .order_by(ScanLog.timestamp.desc())
+                     .first())
+            if row:
+                out[symbol] = row
+        return out
+
+    snapshots = safe("index snapshots", load_snapshots, {})
+    squeeze_state = safe("squeeze state", load_squeeze_state, {})
+    today_signals = safe(
+        "today's signals",
+        lambda: (db.query(Signal)
+                   .filter(Signal.timeframe == tf, Signal.timestamp >= today_start())
+                   .all()),
+        [])
+    recent = safe(
+        "recent signals",
+        lambda: (db.query(Signal).filter(Signal.timeframe == tf)
+                   .order_by(Signal.timestamp.desc()).limit(15).all()),
+        [])
+    logs = safe(
+        "scan log",
+        lambda: (db.query(ScanLog).filter(ScanLog.timeframe == tf)
+                   .order_by(ScanLog.timestamp.desc()).limit(40).all()),
+        [])
+    budget_status = safe("signal budget", budget.check,
+                         {"used": 0, "cap": cfg.MAX_SIGNALS_PER_DAY,
+                          "remaining": cfg.MAX_SIGNALS_PER_DAY, "exhausted": False})
+    watchlist_size = safe("watchlist size", lambda: len(scanner.symbols()), len(cfg.INDICES))
+
     closed = [s for s in today_signals if s.status in CLOSED_STATES]
     wins = [s for s in closed if (s.pnl or 0) > 0]
-
-    recent = (db.query(Signal)
-                .filter(Signal.timeframe == tf)
-                .order_by(Signal.timestamp.desc())
-                .limit(15).all())
-    logs = (db.query(ScanLog)
-              .filter(ScanLog.timeframe == tf)
-              .order_by(ScanLog.timestamp.desc())
-              .limit(40).all())
 
     ctx = {
         "timeframe": tf,
@@ -128,8 +181,8 @@ async def dashboard(request: Request,
         "broker": cfg.FEED_MODE,
         "missing_vars": cfg.missing_credentials(),
         "last_scan": state.last_scan_at.strftime("%H:%M:%S") if state.last_scan_at else "not yet",
-        "budget": budget.check(),
-        "watchlist_size": len(scanner.symbols()),
+        "budget": budget_status,
+        "watchlist_size": watchlist_size,
         "total_signals": len(today_signals),
         "open_signals": len([s for s in today_signals if s.status in OPEN_STATES]),
         "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else 0.0,
@@ -138,6 +191,7 @@ async def dashboard(request: Request,
         "scan_logs": logs,
         "now": now_naive().strftime("%d %b %Y, %H:%M IST"),
         "token": token or "",
+        "render_error": render_error,
     }
     page = templates.TemplateResponse(request, "index.html", ctx)
     if cfg.DASHBOARD_TOKEN and token == cfg.DASHBOARD_TOKEN:
