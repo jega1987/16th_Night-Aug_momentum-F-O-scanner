@@ -1,0 +1,68 @@
+Performance / {{ timeframe }} / last {{ days }}d
+{% for d in [7, 30, 90, 365] %}
+{{ d }}d
+{% endfor %}
+Live
+CSV
+{% if headline.closed == 0 %}
+No closed trades in this window
+Everything below fills in once trades complete. Until then there is nothing to measure.
+{% else %} {% if headline.sample_warning %}
+Only {{ headline.closed }} closed trades. Below about 30 the numbers here are noise, not evidence — a run of luck in either direction will dominate every figure on this page.
+{% endif %}
+closed
+{{ headline.closed }}
+win rate
+{{ headline.win_rate }}%
+net p&l
+{{ '{:+,.0f}'.format(headline.net_pnl) }}
+profit factor
+{{ headline.profit_factor if headline.profit_factor is not none else '—' }}
+expectancy
+{{ '{:+.3f}R'.format(headline.expectancy_r) if headline.expectancy_r is not none else '—' }}
+max drawdown
+{{ '{:,.0f}'.format(headline.max_drawdown) }}
+avg win
+{{ '{:,.0f}'.format(headline.avg_win) }}
+avg loss
+{{ '{:,.0f}'.format(headline.avg_loss) }}
+best
+{{ '{:,.0f}'.format(headline.best) }}
+worst
+{{ '{:,.0f}'.format(headline.worst) }}
+still open
+{{ headline.open }}
+signals
+{{ headline.signals }}
+equity curve
+cumulative paper p&l, closed trades only
+outcome mix
+This is the measurement everything else rests on. The target structure only pays if enough trades reach T2 and T3 — the first target sits inside the stop distance, so a T1-then-breakeven trade returns far less than a stop-out costs.
+
+{% for o in outcomes %} {% endfor %}
+Exit	Trades	Share	Avg R	P&L	 
+{{ o.label }}	{{ o.count }}	{{ o.share_pct }}%	{{ '{:+.2f}'.format(o.avg_r) if o.avg_r is not none else '—' }}	{{ '{:+,.0f}'.format(o.pnl) }}	
+factor post-mortem
+Average score per filter on winners against losers. An edge near zero means the factor isn't separating good trades from bad ones and is costing you signals for nothing. A negative edge means it scores higher on losers — worse than useless.
+
+{% for f in factors %} {% endfor %}
+Factor	On winners	On losers	Edge	Samples	Verdict
+{{ f.factor }}	{{ f.avg_winners if f.avg_winners is not none else '—' }}	{{ f.avg_losers if f.avg_losers is not none else '—' }}	{{ '{:+.3f}'.format(f.edge) if f.edge is not none else '—' }}	{{ f.samples }}	{% if f.edge is none %}no data {% elif f.edge > 0.05 %}discriminating {% elif f.edge < -0.05 %}inverted — review {% else %}not separating{% endif %}
+does the score predict anything?
+If the composite score is worth having, average R should rise as the band rises. If it's flat, the weighting is decoration.
+
+{% for b in score_buckets %} {% endfor %}
+Score band	Trades	Win rate	Avg R	P&L
+{{ b.band }}	{{ b.trades }}	{{ '{}%'.format(b.win_rate) if b.win_rate is not none else '—' }}	{{ '{:+.2f}'.format(b.avg_r) if b.avg_r is not none else '—' }}	{{ '{:+,.0f}'.format(b.pnl) }}
+by symbol & direction
+{% for row in by_symbol + by_direction %} {% endfor %}
+Group	Trades	Win rate	Avg R	P&L
+{{ row.key }}	{{ row.trades }}	{{ row.win_rate }}%	{{ '{:+.2f}'.format(row.avg_r) if row.avg_r is not none else '—' }}	{{ '{:+,.0f}'.format(row.pnl) }}
+{% if options.blocked %}
+options gate
+{{ options.blocked }} of {{ options.total }} signals ({{ options.blocked_pct }}%) had the option leg blocked
+{% for reason, count in options.reasons %} {% endfor %}
+Reason	Count
+{{ reason }}	{{ count }}
+{% endif %} {% endif %}
+{{ now }} · paper signals only, no orders are placed · not investment advice
