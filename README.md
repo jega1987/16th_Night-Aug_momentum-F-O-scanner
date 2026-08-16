@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/31119318/README.md)
+[README.md](https://github.com/user-attachments/files/31119559/README.md)
 # Index Squeeze Scanner
 
 TTM squeeze breakout scanner for Nifty, Bank Nifty and Sensex, with an options
@@ -350,6 +350,18 @@ build. Confirm with Railway's Console: `ls /app/feed_kite.py`. If the file is
 present but the broker is still wrong, check `grep -c kite /app/feed_mock.py` —
 `build_feed()` lives there and a stale copy of that one file is enough to route
 everything wrong.
+
+**`ArgumentError: Could not parse SQLAlchemy URL from given URL string`,
+crash-looping.** `DATABASE_URL` is set but malformed. The most common cause:
+Railway's `${{Postgres.DATABASE_URL}}` reference syntax was typed by hand
+instead of chosen from Railway's autocomplete dropdown, so the variable's
+actual value is the literal template text rather than a real URL. Fix: open
+the Postgres service → Variables tab → copy the `DATABASE_URL` value directly
+(it starts with `postgresql://`) → paste that literal value into your app
+service's `DATABASE_URL`, replacing the `${{...}}` reference. The app now
+detects this specific case, names it in the log, and falls back to SQLite
+instead of crash-looping — but SQLite still means data is lost on every
+redeploy, so it's worth fixing properly.
 
 **`No DATABASE_URL - falling back to SQLite`.** Add the Postgres plugin. On
 SQLite every signal, IV reading and candle is wiped on each redeploy, and IV
