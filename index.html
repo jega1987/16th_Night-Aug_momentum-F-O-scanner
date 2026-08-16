@@ -109,7 +109,13 @@
   <h1>Squeeze Scanner <span>/ {{ timeframe }}</span></h1>
   <span class="pill {% if session == 'LIVE' %}live{% elif session in ['PRE-OPEN','NO NEW ENTRIES','SQUARE-OFF'] %}warn{% else %}off{% endif %}">{{ session }}</span>
   {% if not feed_connected %}<span class="pill off">feed down</span>{% endif %}
-  {% if feed_mode == 'mock' %}<span class="pill warn">mock data</span>{% endif %}
+  {% if render_error %}
+<div class="banner">
+  Part of this page couldn't load: <code>{{ render_error }}</code><br>
+  Everything else below is showing normally. Check the deploy logs for the full traceback.
+</div>
+{% endif %}
+{% if feed_mode == 'mock' %}<span class="pill warn">mock data</span>{% endif %}
   <div class="spacer"></div>
   <span class="pill {% if budget.remaining == 0 %}off{% elif budget.remaining <= 2 %}warn{% endif %}">{{ budget.used }}/{{ budget.cap }} signals</span>
   <span class="lbl">scanned {{ last_scan }}</span>
@@ -119,6 +125,12 @@
   <button class="btn" id="scan">Scan now</button>
 </header>
 
+{% if render_error %}
+<div class="banner">
+  Part of this page couldn't load: <code>{{ render_error }}</code><br>
+  Everything else below is showing normally. Check the deploy logs for the full traceback.
+</div>
+{% endif %}
 {% if feed_mode == 'mock' %}
 <div class="banner">Synthetic feed. Prices, signals and P&amp;L on this page are generated, not market data. Set FEED_MODE=5paisa with credentials to go live.</div>
 {% elif config_error %}
