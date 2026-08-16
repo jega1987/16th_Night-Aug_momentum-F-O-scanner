@@ -1,343 +1,358 @@
 """
-Persistence layer.
+Web layer: one HTML page plus a small JSON API.
 
-Uses DATABASE_URL when present (Railway Postgres) and falls back to a local
-SQLite file otherwise. Railway's filesystem is ephemeral, so SQLite there means
-losing every signal on redeploy - attach the Postgres plugin for anything you
-care about keeping.
+The dashboard is read-only apart from /api/scan-now and the timeframe toggle.
+Set DASHBOARD_TOKEN to keep a public Railway URL private.
 """
 import logging
-import os
-from contextlib import contextmanager
+from typing import Optional
 
-from sqlalchemy import (JSON, Boolean, Column, DateTime, Float, Index, Integer,
-                        String, UniqueConstraint, create_engine, text)
-from sqlalchemy.orm import declarative_base, sessionmaker
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
+                               RedirectResponse, Response)
+from fastapi.templating import Jinja2Templates
+from sqlalchemy.orm import Session
 
-from clock import now_naive
+import analytics
+from clock import MarketClock, now_naive, today_start
 from config import cfg
+from database import IndexSnapshot, ScanLog, Signal, get_db
+from runtime import budget, engine, feed, scanner, state, store, universe
 
 logger = logging.getLogger(__name__)
-Base = declarative_base()
+
+app = FastAPI(title="Index Squeeze Scanner", docs_url="/docs", redoc_url=None)
+templates = Jinja2Templates(directory="templates")
+
+OPEN_STATES = ("OPEN", "RUNNING")
+CLOSED_STATES = ("TP3", "SL", "TRAIL", "SQUAREOFF")
 
 
-def _build_engine():
-    """
-    Build the SQLAlchemy engine.
-
-    This used to call create_engine() directly at import time with no
-    validation. A malformed DATABASE_URL crashed on every single startup
-    attempt, and the traceback never showed what the bad value actually was -
-    just "Could not parse SQLAlchemy URL from given URL string", from deep
-    inside SQLAlchemy's own parser. That is not enough to fix the problem from
-    the log alone. Every check below exists to either name the mistake or
-    refuse to let a bad database setting take the whole app down.
-    """
-    raw = (cfg.DATABASE_URL or "").strip()
-    # A common paste artifact: the value copied with its surrounding quotes.
-    if raw and raw[0] in "\"'" and raw[-1] == raw[0]:
-        raw = raw[1:-1].strip()
-
-    if raw and ("${{" in raw or "}}" in raw):
-        logger.error(
-            "[DB] DATABASE_URL is the literal text '%s' - Railway's ${{...}} "
-            "reference was never resolved. This happens when the syntax is typed "
-            "by hand instead of chosen from Railway's autocomplete dropdown, or "
-            "when the referenced service is not named exactly 'Postgres'. Fix: open "
-            "the Postgres service -> Variables -> copy the DATABASE_URL value "
-            "directly (starts with postgresql://) and paste that literal value into "
-            "this service's DATABASE_URL instead of the ${{...}} reference. "
-            "Falling back to SQLite so the app can start in the meantime.",
-            raw[:80])
-        raw = ""
-
-    elif raw and not raw.startswith(("postgres://", "postgresql://", "postgresql+psycopg2://")):
-        logger.error(
-            "[DB] DATABASE_URL does not look like a Postgres URL (starts with %r, "
-            "%d chars). Expected it to begin with postgresql://. Falling back to "
-            "SQLite so the app can start - fix the variable to use Postgres.",
-            raw[:20], len(raw))
-        raw = ""
-
-    if raw:
-        if raw.startswith("postgres://"):
-            raw = raw.replace("postgres://", "postgresql+psycopg2://", 1)
-        elif raw.startswith("postgresql://") and not raw.startswith("postgresql+psycopg2://"):
-            raw = raw.replace("postgresql://", "postgresql+psycopg2://", 1)
-        try:
-            engine = create_engine(raw, pool_pre_ping=True, pool_recycle=280, future=True)
-            with engine.connect():
-                pass
-            logger.info("[DB] Using Postgres")
-            return engine
-        except Exception as exc:
-            # Never let a bad connection string take the whole process down.
-            # A crash loop over a typo in one variable is a worse outcome than
-            # starting on SQLite and saying so clearly.
-            logger.error("[DB] Could not connect to Postgres (%s) - "
-                         "falling back to SQLite so the app can start", exc)
-
-    os.makedirs("./data", exist_ok=True)
-    logger.warning("[DB] No usable DATABASE_URL - falling back to SQLite at "
-                   "./data/scanner.db (data is lost on every Railway redeploy)")
-    return create_engine(
-        "sqlite:///./data/scanner.db",
-        connect_args={"check_same_thread": False},
-        future=True,
-    )
+def require_token(request: Request, token: Optional[str] = Query(default=None)):
+    """No-op when DASHBOARD_TOKEN is unset. Otherwise accepts ?token=,
+    an X-Dashboard-Token header, or a cookie set on first successful visit."""
+    if not cfg.DASHBOARD_TOKEN:
+        return True
+    supplied = token or request.headers.get("x-dashboard-token") or request.cookies.get("dash_token")
+    if supplied != cfg.DASHBOARD_TOKEN:
+        raise HTTPException(status_code=401, detail="Add ?token=... to the URL to view this dashboard")
+    return True
 
 
-engine = _build_engine()
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
-
-
-class Signal(Base):
-    __tablename__ = "signals"
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=now_naive, index=True)
-    symbol = Column(String, index=True)
-    timeframe = Column(String, index=True)
-    direction = Column(String)
-    asset_class = Column(String, default="INDEX", index=True)   # INDEX | EQUITY
-
-    entry = Column(Float)
-    sl = Column(Float)              # original stop
-    trail_sl = Column(Float)        # live stop after breakeven / supertrend trail
-    tp1 = Column(Float)
-    tp2 = Column(Float)
-    tp3 = Column(Float)
-    qty = Column(Integer)
-    lots = Column(Integer)
-    atr14 = Column(Float)
-    atm_strike = Column(Integer)
-    option_hint = Column(String)    # e.g. "NIFTY 24500 CE"
-
-    # --- options overlay ---
-    option_type = Column(String)            # CE | PE
-    option_expiry = Column(String)
-    option_dte = Column(Integer)
-    option_ltp = Column(Float)
-    option_iv = Column(Float)               # decimal, 0.14 == 14%
-    option_iv_rank = Column(Float)          # 0-100, null until history exists
-    option_delta = Column(Float)
-    option_theta_pct = Column(Float)        # premium burned per day, %
-    option_blocked = Column(Boolean, default=False)
-    option_block_reason = Column(String)
-
-    score_direction = Column(Float)
-    score_squeeze = Column(Float)
-    score_sweep = Column(Float)
-    score_structure = Column(Float)
-    score_volume = Column(Float)
-    score_rsi = Column(Float)
-    score_oi = Column(Float)
-    score_adx = Column(Float)
-    score_htf = Column(Float)
-    composite_score = Column(Float)
-    factor_breakdown = Column(JSON)
-
-    status = Column(String, default="OPEN", index=True)   # OPEN | RUNNING | TP3 | SL | TRAIL | SQUAREOFF
-    tp1_hit = Column(Boolean, default=False)
-    tp2_hit = Column(Boolean, default=False)
-    qty_open = Column(Integer)
-    realized_pnl = Column(Float, default=0.0)
-    exit_price = Column(Float)
-    exit_time = Column(DateTime)
-    pnl = Column(Float, default=0.0)
-    pnl_pct = Column(Float)
-    r_multiple = Column(Float)
-    mfe = Column(Float)             # best price seen while open
-    triggered_by = Column(String, default="scanner")
-    notes = Column(String)
-
-
-class IndexSnapshot(Base):
-    __tablename__ = "index_snapshots"
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=now_naive, index=True)
-    symbol = Column(String, index=True)
-    ltp = Column(Float)
-    open_price = Column(Float)
-    high = Column(Float)
-    low = Column(Float)
-    prev_close = Column(Float)
-    change_pct = Column(Float)
-    change_abs = Column(Float)
-    volume = Column(Integer)
-    oi = Column(Integer)
-
-
-class OISnapshot(Base):
-    """Open interest history - needed to compute a real OI change instead of
-    guessing. One row per symbol per scan."""
-    __tablename__ = "oi_snapshots"
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=now_naive, index=True)
-    symbol = Column(String, index=True)
-    oi = Column(Float)
-    price = Column(Float)
-
-
-class Candle(Base):
-    """
-    Stored OHLCV. A closed bar never changes, so it is fetched once and reused
-    for the life of the deployment.
-    """
-    __tablename__ = "candles"
-    id = Column(Integer, primary_key=True)
-    symbol = Column(String, index=True)
-    timeframe = Column(String, index=True)
-    timestamp = Column(DateTime, index=True)
-    open = Column(Float)
-    high = Column(Float)
-    low = Column(Float)
-    close = Column(Float)
-    volume = Column(Float)
-    __table_args__ = (
-        UniqueConstraint("symbol", "timeframe", "timestamp", name="uq_candle"),
-        Index("ix_candle_lookup", "symbol", "timeframe", "timestamp"),
-    )
-
-
-class BrokerToken(Base):
-    """
-    Daily broker session token.
-
-    Kite access tokens expire each morning and are only issued through a
-    browser redirect, which does not fit an always-on container. Persisting the
-    token means the morning login is one click rather than a redeploy, and it
-    survives restarts.
-    """
-    __tablename__ = "broker_tokens"
-    id = Column(Integer, primary_key=True)
-    broker = Column(String, index=True)
-    access_token = Column(String)
-    public_token = Column(String)
-    user_id = Column(String)
-    issued_at = Column(DateTime, default=now_naive, index=True)
-
-
-class UniverseMember(Base):
-    """One row per stock selected into today's tradable universe."""
-    __tablename__ = "universe_members"
-    id = Column(Integer, primary_key=True)
-    selected_on = Column(DateTime, default=now_naive, index=True)
-    rank = Column(Integer, index=True)
-    symbol = Column(String, index=True)
-    root = Column(String)
-    scrip_code = Column(Integer)
-    exch = Column(String)
-    exch_type = Column(String)
-    lot_size = Column(Integer, default=0)
-    expiry = Column(String, nullable=True)
-    ltp = Column(Float)
-    turnover_cr = Column(Float)
-    momentum_pct = Column(Float)
-    momentum_source = Column(String)     # "5d" | "1d" | "none" - never guessed
-    rank_score = Column(Float)
-
-
-class IVSnapshot(Base):
-    """ATM implied volatility history. Without this, IV rank is a guess."""
-    __tablename__ = "iv_snapshots"
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=now_naive, index=True)
-    symbol = Column(String, index=True)
-    atm_iv = Column(Float)
-    futures_price = Column(Float)
-    expiry = Column(String)
-
-
-class ScanLog(Base):
-    __tablename__ = "scan_logs"
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=now_naive, index=True)
-    symbol = Column(String, index=True)
-    timeframe = Column(String, index=True)
-    in_squeeze = Column(Boolean)
-    squeeze_bars = Column(Integer)
-    bars_since_fire = Column(Integer)
-    fired = Column(Boolean)
-    close = Column(Float)
-    adx_value = Column(Float)
-    rsi_value = Column(Float)
-    vol_ratio = Column(Float)
-    oi_change_pct = Column(Float)
-    composite_score = Column(Float)
-    passed = Column(Boolean)
-    rejection_reason = Column(String)
-
-
-class ScripMapping(Base):
-    __tablename__ = "scrip_mappings"
-    id = Column(Integer, primary_key=True)
-    updated_at = Column(DateTime, default=now_naive, index=True)
-    symbol = Column(String, index=True)
-    root_name = Column(String)
-    scrip_code = Column(Integer)
-    exch = Column(String)
-    exch_type = Column(String)
-    contract_name = Column(String)
-    expiry_date = Column(String, nullable=True)
-    lot_size = Column(Integer, default=0)
-    is_current = Column(Boolean, default=True, index=True)
-    oi = Column(Integer, default=0)
-
-
-def _add_missing_columns() -> None:
-    """
-    create_all() creates tables but never ALTERs existing ones. On Railway you
-    can't casually drop the database, so add any new columns in place.
-    """
-    from sqlalchemy import inspect
-    inspector = inspect(engine)
-    dialect = engine.dialect.name
-
-    for table in Base.metadata.sorted_tables:
-        if not inspector.has_table(table.name):
-            continue
-        existing = {c["name"] for c in inspector.get_columns(table.name)}
-        for column in table.columns:
-            if column.name in existing:
-                continue
-            col_type = column.type.compile(dialect=engine.dialect)
-            if dialect == "postgresql" and col_type.upper() == "JSON":
-                col_type = "JSONB"
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text(
-                        f'ALTER TABLE {table.name} ADD COLUMN {column.name} {col_type}'))
-                logger.info("[DB] Added %s.%s", table.name, column.name)
-            except Exception as exc:
-                logger.warning("[DB] Could not add %s.%s: %s", table.name, column.name, exc)
-
-
-def init_db() -> None:
-    Base.metadata.create_all(engine)
-    _add_missing_columns()
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    logger.info("[DB] Schema ready")
-
-
-@contextmanager
-def session_scope():
-    """Commit on success, roll back on failure, always close."""
-    db = SessionLocal()
+# --------------------------------------------------------------------------- #
+@app.get("/health")
+async def health(db: Session = Depends(get_db)):
+    """Railway health check. Reports degraded rather than failing so a broker
+    outage doesn't put the service into a restart loop."""
     try:
-        yield db
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+        signals_today = db.query(Signal).filter(Signal.timestamp >= today_start()).count()
+        db_ok = True
+    except Exception as exc:
+        signals_today, db_ok = 0, False
+        logger.error("[Health] DB check failed: %s", exc)
+
+    return JSONResponse({
+        "status": "ok" if db_ok else "degraded",
+        "feed": {"mode": cfg.FEED_MODE, "connected": state.feed_connected,
+                 "error": state.feed_error},
+        "warmed_up": state.warmed_up,
+        "config": {"ok": not state.config_error,
+                   "error": state.config_error,
+                   "missing": cfg.missing_credentials(),
+                   "database": "postgres" if cfg.DATABASE_URL else "sqlite (ephemeral)"},
+        "market": MarketClock.session_label(),
+        "timeframe": cfg.TIMEFRAME,
+        "scans": state.scan_count,
+        "last_scan_at": state.last_scan_at.isoformat() if state.last_scan_at else None,
+        "last_scan_error": state.last_scan_error,
+        "signals_today": signals_today,
+        "candle_store": store.stats(),
+        "budget": budget.check(),
+        "universe": {"size": state.universe_size, "symbols": len(universe.load())},
+        "stream": getattr(getattr(feed, "stream", None), "status", lambda: None)(),
+        "server_time_ist": now_naive().isoformat(timespec="seconds"),
+    })
 
 
-def get_db():
-    """FastAPI dependency."""
-    db = SessionLocal()
+@app.get("/")
+async def dashboard(request: Request,
+                    tf: str = Query(default=None),
+                    token: Optional[str] = Query(default=None),
+                    db: Session = Depends(get_db),
+                    _=Depends(require_token)):
+    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+
+    snapshots = {}
+    for symbol in cfg.INDICES:
+        snap = (db.query(IndexSnapshot)
+                  .filter(IndexSnapshot.symbol == symbol)
+                  .order_by(IndexSnapshot.timestamp.desc())
+                  .first())
+        if snap:
+            snapshots[symbol] = snap
+
+    squeeze_state = {}
+    for symbol in cfg.INDICES:
+        row = (db.query(ScanLog)
+                 .filter(ScanLog.symbol == symbol, ScanLog.timeframe == tf)
+                 .order_by(ScanLog.timestamp.desc())
+                 .first())
+        if row:
+            squeeze_state[symbol] = row
+
+    today_signals = (db.query(Signal)
+                       .filter(Signal.timeframe == tf, Signal.timestamp >= today_start())
+                       .all())
+    closed = [s for s in today_signals if s.status in CLOSED_STATES]
+    wins = [s for s in closed if (s.pnl or 0) > 0]
+
+    recent = (db.query(Signal)
+                .filter(Signal.timeframe == tf)
+                .order_by(Signal.timestamp.desc())
+                .limit(15).all())
+    logs = (db.query(ScanLog)
+              .filter(ScanLog.timeframe == tf)
+              .order_by(ScanLog.timestamp.desc())
+              .limit(40).all())
+
+    ctx = {
+        "timeframe": tf,
+        "indices": cfg.INDICES,
+        "snapshots": snapshots,
+        "squeeze_state": squeeze_state,
+        "min_squeeze_bars": cfg.MIN_SQUEEZE_BARS,
+        "session": MarketClock.session_label(),
+        "feed_mode": cfg.FEED_MODE,
+        "feed_connected": state.feed_connected,
+        "config_error": state.config_error,
+        "broker": cfg.FEED_MODE,
+        "missing_vars": cfg.missing_credentials(),
+        "last_scan": state.last_scan_at.strftime("%H:%M:%S") if state.last_scan_at else "not yet",
+        "budget": budget.check(),
+        "watchlist_size": len(scanner.symbols()),
+        "total_signals": len(today_signals),
+        "open_signals": len([s for s in today_signals if s.status in OPEN_STATES]),
+        "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else 0.0,
+        "total_pnl": round(sum(s.pnl or 0 for s in closed), 2),
+        "recent_signals": recent,
+        "scan_logs": logs,
+        "now": now_naive().strftime("%d %b %Y, %H:%M IST"),
+        "token": token or "",
+    }
+    page = templates.TemplateResponse(request, "index.html", ctx)
+    if cfg.DASHBOARD_TOKEN and token == cfg.DASHBOARD_TOKEN:
+        page.set_cookie("dash_token", token, httponly=True, samesite="lax", max_age=86400)
+    return page
+
+
+# --------------------------------------------------------------------------- #
+@app.get("/api/signals")
+async def api_signals(tf: str = Query(default=None), limit: int = Query(default=50, le=200),
+                      db: Session = Depends(get_db), _=Depends(require_token)):
+    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    rows = (db.query(Signal).filter(Signal.timeframe == tf)
+              .order_by(Signal.timestamp.desc()).limit(limit).all())
+    return [{
+        "id": r.id, "time": r.timestamp.strftime("%d-%m %H:%M") if r.timestamp else None,
+        "symbol": r.symbol, "direction": r.direction, "entry": r.entry,
+        "sl": r.sl, "trail_sl": r.trail_sl, "tp1": r.tp1, "tp2": r.tp2, "tp3": r.tp3,
+        "qty": r.qty, "lots": r.lots, "status": r.status, "pnl": r.pnl,
+        "r_multiple": r.r_multiple, "score": r.composite_score,
+        "option_hint": r.option_hint, "factors": r.factor_breakdown,
+    } for r in rows]
+
+
+@app.get("/api/equity")
+async def api_equity(tf: str = Query(default=None), db: Session = Depends(get_db),
+                     _=Depends(require_token)):
+    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    rows = (db.query(Signal)
+              .filter(Signal.timeframe == tf, Signal.status.in_(CLOSED_STATES))
+              .order_by(Signal.timestamp).all())
+    curve, running = [], 0.0
+    for r in rows:
+        running += r.pnl or 0
+        curve.append({"time": r.timestamp.strftime("%d-%m %H:%M"), "pnl": round(running, 2)})
+    return curve
+
+
+@app.get("/api/stats")
+async def api_stats(tf: str = Query(default=None), _=Depends(require_token)):
+    return engine.daily_stats(tf if tf in ("5m", "15m") else cfg.TIMEFRAME)
+
+
+@app.get("/api/scan-now")
+async def api_scan_now(force: bool = Query(default=True), _=Depends(require_token)):
+    """Run a scan immediately, ignoring the market-hours gate by default."""
     try:
-        yield db
-    finally:
-        db.close()
+        created = await scanner.run_cycle(force=force)
+        state.last_scan_at = now_naive()
+        state.scan_count += 1
+        return {"ok": True, "signals_created": len(created),
+                "signals": [{"id": c["id"], "symbol": c["symbol"], "direction": c["direction"],
+                             "entry": c["entry"], "score": c["composite_score"]} for c in created]}
+    except Exception as exc:
+        logger.exception("[API] Manual scan failed")
+        state.last_scan_error = str(exc)
+        raise HTTPException(status_code=502, detail=f"Scan failed: {exc}")
+
+
+@app.get("/api/switch-timeframe")
+async def api_switch_timeframe(tf: str = Query(...), _=Depends(require_token)):
+    if tf not in ("5m", "15m"):
+        raise HTTPException(status_code=400, detail="Timeframe must be 5m or 15m")
+    cfg.set_timeframe(tf)
+    return {"ok": True, "timeframe": cfg.TIMEFRAME, "bar_minutes": cfg.BAR_MINUTES}
+
+
+@app.get("/api/square-off")
+async def api_square_off(_=Depends(require_token)):
+    closed = await engine.force_square_off(feed, reason="Manual square-off")
+    return {"ok": True, "closed": len(closed)}
+
+
+@app.get("/performance")
+async def performance_page(request: Request,
+                           days: int = Query(default=30, ge=1, le=730),
+                           tf: str = Query(default=None),
+                           token: Optional[str] = Query(default=None),
+                           _=Depends(require_token)):
+    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    report = analytics.full_report(days, tf)
+    ctx = {
+        "timeframe": tf, "days": days, "token": token or "",
+        "now": now_naive().strftime("%d %b %Y, %H:%M IST"),
+        **report,
+    }
+    return templates.TemplateResponse(request, "performance.html", ctx)
+
+
+@app.get("/api/performance")
+async def api_performance(days: int = Query(default=30, ge=1, le=730),
+                          tf: str = Query(default=None), _=Depends(require_token)):
+    return analytics.full_report(days, tf if tf in ("5m", "15m") else cfg.TIMEFRAME)
+
+
+@app.get("/api/equity-curve")
+async def api_equity_curve(days: int = Query(default=30, ge=1, le=730),
+                           tf: str = Query(default=None), _=Depends(require_token)):
+    return analytics.equity_curve(days, tf if tf in ("5m", "15m") else cfg.TIMEFRAME)
+
+
+@app.get("/api/export.csv")
+async def api_export(days: int = Query(default=365, ge=1, le=3650),
+                     tf: str = Query(default=None), _=Depends(require_token)):
+    """The whole ledger, for analysis outside this app."""
+    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    csv_text = analytics.to_csv(days, tf)
+    stamp = now_naive().strftime("%Y%m%d")
+    return Response(
+        content=csv_text, media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="signals_{tf}_{stamp}.csv"'})
+
+
+# --------------------------------------------------------------------------- #
+# Kite session. Access tokens expire every morning and can only be minted via a
+# browser redirect, so these two routes turn the daily refresh into one click.
+# --------------------------------------------------------------------------- #
+@app.get("/kite/login")
+async def kite_login(_=Depends(require_token)):
+    if cfg.FEED_MODE != "kite":
+        raise HTTPException(status_code=400, detail=f"FEED_MODE is '{cfg.FEED_MODE}', not kite")
+    from feed_kite import KiteFeed
+    url = KiteFeed.login_url()
+    if not url:
+        raise HTTPException(status_code=500,
+                            detail="kiteconnect is not installed, or KITE_API_KEY is unset")
+    return RedirectResponse(url)
+
+
+@app.get("/kite/callback")
+async def kite_callback(request_token: str = Query(default=None),
+                        status: str = Query(default=None)):
+    """
+    Kite redirects here after login. This route is deliberately NOT behind
+    DASHBOARD_TOKEN - Kite controls the redirect and cannot add a custom query
+    parameter. The request_token is single-use and short-lived, and is useless
+    without the API secret, which never leaves the server.
+    """
+    if status == "error" or not request_token:
+        return HTMLResponse(_page("Login failed",
+                                  "Kite did not return a request token. Check that the "
+                                  "redirect URL registered on the Kite developer console "
+                                  "exactly matches this address."), status_code=400)
+    try:
+        from feed_kite import KiteFeed
+        data = KiteFeed.exchange_request_token(request_token)
+        state.config_error = None
+        state.feed_connected = False          # force a clean reconnect with the new token
+        ok = await _reconnect_now()
+        who = data.get("user_name") or data.get("user_id") or "your account"
+        body = (f"Signed in as <b>{who}</b>. The token is stored and valid until "
+                f"tomorrow morning.<br><br>"
+                f"Feed reconnected: <b>{'yes' if ok else 'not yet - see /health'}</b>")
+        return HTMLResponse(_page("Kite connected", body))
+    except Exception as exc:
+        logger.exception("[Kite] Token exchange failed")
+        return HTMLResponse(_page("Token exchange failed", str(exc)), status_code=502)
+
+
+@app.get("/kite/status")
+async def kite_status(_=Depends(require_token)):
+    from feed_kite import KiteFeed
+    token = KiteFeed.load_token()
+    return {
+        "broker": cfg.FEED_MODE,
+        "token_present": bool(token),
+        "connected": state.feed_connected,
+        "error": state.feed_error,
+        "login_url": "/kite/login",
+    }
+
+
+async def _reconnect_now() -> bool:
+    try:
+        await feed.connect()
+        state.feed_connected = True
+        state.feed_error = None
+        return True
+    except Exception as exc:
+        state.feed_error = str(exc)
+        logger.error("[Kite] Reconnect after login failed: %s", exc)
+        return False
+
+
+def _page(title: str, body: str) -> str:
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
+<style>body{{background:#11151b;color:#e4e8ec;font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px;margin:0}}
+.card{{border:1px solid #2b3540;border-radius:3px;padding:26px 30px;max-width:520px;background:#171d25}}
+h1{{font-size:15px;letter-spacing:.02em;margin:0 0 12px}}a{{color:#6aa8ff}}code{{color:#e0a53c}}</style>
+</head><body><div class="card"><h1>{title}</h1><p>{body}</p>
+<p><a href="/">Back to the dashboard</a></p></div></body></html>"""
+
+
+@app.get("/api/universe")
+async def api_universe(limit: int = Query(default=200, le=500), _=Depends(require_token)):
+    return {"selected": universe.detail(limit), "drop_reasons": universe.last_reason}
+
+
+@app.get("/api/budget")
+async def api_budget(_=Depends(require_token)):
+    return budget.check()
+
+
+@app.get("/api/logs")
+async def api_logs(tf: str = Query(default=None), limit: int = Query(default=50, le=300),
+                   db: Session = Depends(get_db), _=Depends(require_token)):
+    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    rows = (db.query(ScanLog).filter(ScanLog.timeframe == tf)
+              .order_by(ScanLog.timestamp.desc()).limit(limit).all())
+    return [{
+        "time": r.timestamp.strftime("%H:%M:%S") if r.timestamp else None,
+        "symbol": r.symbol, "in_squeeze": r.in_squeeze, "squeeze_bars": r.squeeze_bars,
+        "bars_since_fire": r.bars_since_fire, "close": r.close, "adx": r.adx_value,
+        "rsi": r.rsi_value, "vol_ratio": r.vol_ratio, "oi_change_pct": r.oi_change_pct,
+        "score": r.composite_score, "passed": r.passed, "reason": r.rejection_reason,
+    } for r in rows]
