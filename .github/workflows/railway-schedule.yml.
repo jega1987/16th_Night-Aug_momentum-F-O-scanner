@@ -1,0 +1,34 @@
+name: Railway Auto Start/Stop
+
+on:
+  schedule:
+    # 8:00 AM IST (02:30 UTC) Monday-Friday
+    - cron: '30 2 * * 1-5'
+    # 5:00 PM IST (11:30 UTC) Monday-Friday
+    - cron: '30 11 * * 1-5'
+
+jobs:
+  scale-services:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Determine Scale Count
+        id: scale-logic
+        run: |
+          HOUR=$(date +%H)
+          # If it is 2 AM UTC (8 AM IST), scale up to 1. Otherwise, scale to 0.
+          if [ "$HOUR" -eq "02" ]; then
+            echo "REPLICAS=1" >> $GITHUB_ENV
+          else
+            echo "REPLICAS=0" >> $GITHUB_ENV
+          fi
+
+      - name: Execute Railway Scale
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        # Replace 'us-west' below with your actual Railway region
+        run: |
+          railway scale --service web --environment production us-west=${{ env.REPLICAS }}
+          railway scale --service worker --environment production us-west=${{ env.REPLICAS }}
