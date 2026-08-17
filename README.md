@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/31119559/README.md)
+[README.md](https://github.com/user-attachments/files/31146739/README.md)
 # Index Squeeze Scanner
 
 TTM squeeze breakout scanner for Nifty, Bank Nifty and Sensex, with an options
