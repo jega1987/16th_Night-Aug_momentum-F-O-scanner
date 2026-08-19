@@ -176,6 +176,30 @@ async def job_sample_iv():
         logger.warning("[IV] Sampling failed: %s", exc)
 
 
+async def job_auto_login():
+    """
+    Refresh the Kite token via TOTP before the open.
+
+    Enabled only when KITE_AUTO_LOGIN=true. On failure it logs the specific
+    step that broke and leaves the manual /kite/login route as the fallback -
+    it never crashes the app, because a broken auto-login should degrade to
+    "please log in", not take the scanner down.
+    """
+    if not cfg.KITE_AUTO_LOGIN or cfg.FEED_MODE != "kite":
+        return
+    try:
+        from kite_autologin import auto_login
+        await asyncio.to_thread(auto_login)
+        state.config_error = None
+        state.feed_connected = False       # force a clean reconnect with the new token
+        await connect_feed()
+        logger.info("[AutoLogin] Token refreshed and feed reconnected")
+    except Exception as exc:
+        step = getattr(exc, "step", "unknown")
+        logger.error("[AutoLogin] Failed at step '%s': %s", step, exc)
+        await notifier.send_error("Kite auto-login", f"[{step}] {exc}")
+
+
 async def job_manage_stream():
     """
     Own the streaming connection across the session: start it once the market
@@ -231,9 +255,21 @@ def register_jobs():
     scheduler.add_job(job_refresh_instruments,
                       CronTrigger(day_of_week="mon-fri", hour=8, minute=15, timezone=IST),
                       id="instruments", replace_existing=True)
+    if cfg.KITE_AUTO_LOGIN:
+        scheduler.add_job(job_auto_login,
+                          CronTrigger(day_of_week="mon-fri",
+                                      hour=cfg.KITE_AUTO_LOGIN_HOUR,
+                                      minute=cfg.KITE_AUTO_LOGIN_MINUTE, timezone=IST),
+                          id="autologin", replace_existing=True)
+    # Two universe builds. The 08:30 pass ranks on momentum and price (no
+    # volume exists yet); the 09:45 pass re-ranks with half an hour of real
+    # turnover behind it, which is what the liquidity floor actually needs.
     scheduler.add_job(job_build_universe,
                       CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone=IST),
                       id="universe", replace_existing=True)
+    scheduler.add_job(job_build_universe,
+                      CronTrigger(day_of_week="mon-fri", hour=9, minute=45, timezone=IST),
+                      id="universe_refresh", replace_existing=True)
     scheduler.add_job(job_premarket_backfill,
                       CronTrigger(day_of_week="mon-fri", hour=8, minute=45, timezone=IST),
                       id="backfill", replace_existing=True)
@@ -260,6 +296,11 @@ async def warm_up() -> None:
     """
     try:
         await connect_feed()
+        # Stored token dead and auto-login on? Refresh now rather than waiting
+        # for the next scheduled run - the app may have booted mid-session.
+        if not state.feed_connected and cfg.KITE_AUTO_LOGIN and cfg.FEED_MODE == "kite":
+            logger.info("[Startup] No valid token - attempting auto-login")
+            await job_auto_login()
         if cfg.EQUITY_ENABLED and state.feed_connected and not universe.load():
             await job_build_universe()      # cold start - don't wait for tomorrow
         if cfg.RUN_SCHEDULER:
