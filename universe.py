@@ -23,11 +23,25 @@ import logging
 from datetime import timedelta
 from typing import Dict, List, Optional
 
-from clock import now_naive, today_start
+from clock import MarketClock, now_naive, today_start
 from config import cfg
 from database import Candle, UniverseMember, session_scope
 
 logger = logging.getLogger(__name__)
+
+SESSION_MINUTES = 375.0          # 09:15 - 15:30
+
+
+def _session_elapsed_fraction() -> float:
+    """0.0 before the open, 1.0 after the close, fraction during the session."""
+    now = now_naive()
+    open_at = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    close_at = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    if now <= open_at:
+        return 0.0
+    if now >= close_at:
+        return 1.0
+    return (now - open_at).total_seconds() / (SESSION_MINUTES * 60.0)
 
 
 class UniverseBuilder:
@@ -57,6 +71,21 @@ class UniverseBuilder:
             logger.warning("[Universe] No quotes returned - keeping yesterday's list")
             return self.load()
 
+        # The turnover floor is a FULL-DAY number, but quote volume is
+        # cumulative from the open. Compared naively, a pre-open build sees
+        # zero volume everywhere and filters out the entire market - which is
+        # exactly what happened the first live morning. Scale the threshold to
+        # how much of the session has actually elapsed, and before the open
+        # skip the turnover gate entirely (rank on momentum and price alone).
+        elapsed = _session_elapsed_fraction()
+        turnover_floor = cfg.MIN_TURNOVER_CR * elapsed if elapsed > 0 else 0.0
+        if elapsed <= 0:
+            logger.info("[Universe] Pre-open build - turnover gate skipped, "
+                        "ranking on momentum and price only")
+        elif elapsed < 1.0:
+            logger.info("[Universe] %d%% of session elapsed - turnover floor "
+                        "scaled to Rs %.2f cr", int(elapsed * 100), turnover_floor)
+
         rows, dropped = [], {"no_quote": 0, "below_price": 0, "below_turnover": 0}
         for c in candidates:
             q = quotes.get(c["symbol"])
@@ -69,7 +98,7 @@ class UniverseBuilder:
                 continue
 
             turnover_cr = (ltp * float(q.get("volume") or 0)) / 1e7
-            if turnover_cr < cfg.MIN_TURNOVER_CR:
+            if turnover_floor > 0 and turnover_cr < turnover_floor:
                 dropped["below_turnover"] += 1
                 continue
 
