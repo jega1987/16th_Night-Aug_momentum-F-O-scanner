@@ -308,6 +308,15 @@ class KiteFeed(MarketFeed):
                              f"(token {token}, futures={use_futures})")
 
         df = pd.DataFrame(rows)
+        # Kite returns timezone-AWARE IST datetimes. The rest of the app - and
+        # the database column - is naive IST. Passing aware values through let
+        # Postgres silently convert them to UTC on insert, which both shifted
+        # every stored bar by 5h30m and broke the store's duplicate check
+        # (aware 11:50+05:30 never equals stored naive 11:50), producing
+        # UniqueViolation crashes on backfill. Strip the tz at the boundary so
+        # exactly one convention exists everywhere inside the app.
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
         # Keep OI alongside the OHLCV - this is the real win over polling.
         oi_series = df["oi"].copy() if "oi" in df.columns else None
         out = self.normalize(df.rename(columns={"date": "timestamp"}), bars)
