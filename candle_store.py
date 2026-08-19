@@ -148,9 +148,40 @@ class CandleStore:
         """
         Upsert. The most recent stored bar is always rewritten because it may
         have been mid-formation when we last saw it.
+
+        Timestamps are normalised to naive IST before comparison or insert. A
+        feed that hands over timezone-aware datetimes would otherwise defeat
+        the duplicate check (aware never equals naive) and then hit the unique
+        constraint. If a constraint violation still occurs - e.g. rows written
+        by an older version with a different timezone convention - the store
+        wipes that symbol/timeframe and rewrites it fresh: candles are a cache
+        of exchange data, so discarding and refetching is always safe.
         """
         if df is None or df.empty:
             return 0
+        df = df.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        try:
+            df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+        except TypeError:
+            pass          # already naive
+        try:
+            return CandleStore._write_rows(symbol, timeframe, df)
+        except Exception as exc:
+            if "unique" not in str(exc).lower() and "duplicate" not in str(exc).lower():
+                raise
+            logger.warning(
+                "[Store] %s %s: constraint clash with rows from an older "
+                "timestamp convention - wiping and rewriting this cache (%s)",
+                symbol, timeframe, str(exc).splitlines()[0][:90])
+            with session_scope() as db:
+                db.query(Candle).filter(Candle.symbol == symbol,
+                                        Candle.timeframe == timeframe
+                                        ).delete(synchronize_session=False)
+            return CandleStore._write_rows(symbol, timeframe, df)
+
+    @staticmethod
+    def _write_rows(symbol: str, timeframe: str, df: pd.DataFrame) -> int:
         written = 0
         with session_scope() as db:
             existing = {
