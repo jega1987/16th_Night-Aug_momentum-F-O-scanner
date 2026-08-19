@@ -59,6 +59,7 @@ class AppState:
     universe_size = 0
     stream_started = False
     config_error = None
+    warmed_up = False
 
 
 state = AppState()
