@@ -259,6 +259,17 @@ class StrategyConfig:
     # Public base URL, used to build the redirect shown on the login page.
     PUBLIC_URL: str = os.getenv("PUBLIC_URL", os.getenv("RAILWAY_PUBLIC_DOMAIN", ""))
 
+    # ---------- Kite auto-login (TOTP) ----------
+    # Enables the scheduled job_auto_login job in main.py. Off by default -
+    # scripted login is against Kite's ToS (see kite_autologin.py) and must be
+    # opted into explicitly.
+    KITE_AUTO_LOGIN: bool = _bool("KITE_AUTO_LOGIN", False)
+    KITE_AUTO_LOGIN_HOUR: int = _int("KITE_AUTO_LOGIN_HOUR", 8)
+    KITE_AUTO_LOGIN_MINUTE: int = _int("KITE_AUTO_LOGIN_MINUTE", 0)
+    KITE_USER_ID: str = os.getenv("KITE_USER_ID", "")
+    KITE_PASSWORD: str = os.getenv("KITE_PASSWORD", "")
+    KITE_TOTP_SECRET: str = os.getenv("KITE_TOTP_SECRET", "")
+
     # ---------- notifications ----------
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
