@@ -48,6 +48,19 @@ OPEN_STATES = ("OPEN", "RUNNING")
 CLOSED_STATES = ("TP3", "SL", "TRAIL", "SQUAREOFF")
 
 
+def _parse_symbol_filter(raw: Optional[str]) -> list:
+    """'hindalco, nifty 50' -> ['HINDALCO', 'NIFTY 50']. Blank/None -> []."""
+    if not raw:
+        return []
+    return [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+
+# job_snapshots runs every 60s while the market is open (main.py). Missing a
+# couple of cycles in a row - not just one - is what actually indicates the
+# feed has stopped updating rather than one slow request.
+STALE_SNAPSHOT_SECONDS = 150
+
+
 def require_token(request: Request, token: Optional[str] = Query(default=None)):
     """No-op when DASHBOARD_TOKEN is unset. Otherwise accepts ?token=,
     an X-Dashboard-Token header, or a cookie set on first successful visit."""
@@ -97,6 +110,8 @@ async def health(db: Session = Depends(get_db)):
 @app.get("/")
 async def dashboard(request: Request,
                     tf: str = Query(default=None),
+                    symbol: Optional[str] = Query(default=None,
+                        description="Comma-separated symbols to filter the scan log by, e.g. 'NIFTY 50,BANKNIFTY'"),
                     token: Optional[str] = Query(default=None),
                     db: Session = Depends(get_db),
                     _=Depends(require_token)):
@@ -143,6 +158,12 @@ async def dashboard(request: Request,
         return out
 
     snapshots = safe("index snapshots", load_snapshots, {})
+    now_ts = now_naive()
+    stale_symbols = {
+        sym for sym, snap in snapshots.items()
+        if snap.timestamp and (now_ts - snap.timestamp).total_seconds() > STALE_SNAPSHOT_SECONDS
+        and MarketClock.is_market_open()
+    }
     squeeze_state = safe("squeeze state", load_squeeze_state, {})
     today_signals = safe(
         "today's signals",
@@ -155,11 +176,15 @@ async def dashboard(request: Request,
         lambda: (db.query(Signal).filter(Signal.timeframe == tf)
                    .order_by(Signal.timestamp.desc()).limit(15).all()),
         [])
-    logs = safe(
-        "scan log",
-        lambda: (db.query(ScanLog).filter(ScanLog.timeframe == tf)
-                   .order_by(ScanLog.timestamp.desc()).limit(40).all()),
-        [])
+    symbols_filter = _parse_symbol_filter(symbol)
+
+    def load_logs():
+        q = db.query(ScanLog).filter(ScanLog.timeframe == tf)
+        if symbols_filter:
+            q = q.filter(ScanLog.symbol.in_(symbols_filter))
+        return q.order_by(ScanLog.timestamp.desc()).limit(40).all()
+
+    logs = safe("scan log", load_logs, [])
     budget_status = safe("signal budget", budget.check,
                          {"used": 0, "cap": cfg.MAX_SIGNALS_PER_DAY,
                           "remaining": cfg.MAX_SIGNALS_PER_DAY, "exhausted": False})
@@ -189,6 +214,8 @@ async def dashboard(request: Request,
         "total_pnl": round(sum(s.pnl or 0 for s in closed), 2),
         "recent_signals": recent,
         "scan_logs": logs,
+        "scan_symbol_filter": symbol or "",
+        "stale_symbols": stale_symbols,
         "now": now_naive().strftime("%d %b %Y, %H:%M IST"),
         "token": token or "",
         "render_error": render_error,
@@ -398,15 +425,25 @@ async def api_budget(_=Depends(require_token)):
 
 
 @app.get("/api/logs")
-async def api_logs(tf: str = Query(default=None), limit: int = Query(default=50, le=300),
+async def api_logs(tf: str = Query(default=None),
+                   symbol: Optional[str] = Query(default=None,
+                       description="Comma-separated symbols, e.g. 'NIFTY 50,BANKNIFTY,HINDALCO'"),
+                   limit: int = Query(default=50, le=300),
                    db: Session = Depends(get_db), _=Depends(require_token)):
     tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
-    rows = (db.query(ScanLog).filter(ScanLog.timeframe == tf)
-              .order_by(ScanLog.timestamp.desc()).limit(limit).all())
+    symbols_filter = _parse_symbol_filter(symbol)
+    q = db.query(ScanLog).filter(ScanLog.timeframe == tf)
+    if symbols_filter:
+        q = q.filter(ScanLog.symbol.in_(symbols_filter))
+    rows = q.order_by(ScanLog.timestamp.desc()).limit(limit).all()
     return [{
         "time": r.timestamp.strftime("%H:%M:%S") if r.timestamp else None,
         "symbol": r.symbol, "in_squeeze": r.in_squeeze, "squeeze_bars": r.squeeze_bars,
         "bars_since_fire": r.bars_since_fire, "close": r.close, "adx": r.adx_value,
         "rsi": r.rsi_value, "vol_ratio": r.vol_ratio, "oi_change_pct": r.oi_change_pct,
         "score": r.composite_score, "passed": r.passed, "reason": r.rejection_reason,
+        # Per-factor breakdown (direction/squeeze/volume/adx/rsi/structure/
+        # sweep/oi/htf/composite/composite_all), 0-1 each. None on rows logged
+        # before this field existed.
+        "factors": r.factors,
     } for r in rows]
