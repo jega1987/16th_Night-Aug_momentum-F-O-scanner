@@ -266,6 +266,11 @@ class ScanLog(Base):
     composite_score = Column(Float)
     passed = Column(Boolean)
     rejection_reason = Column(String)
+    # Per-factor scores (direction, squeeze, volume, adx, rsi, structure,
+    # sweep, oi, htf, composite, composite_all) - the same dict filters.py
+    # computed, so the dashboard/API can show which factor failed instead of
+    # just the composite number.
+    factors = Column(JSON)
 
 
 class ScripMapping(Base):
