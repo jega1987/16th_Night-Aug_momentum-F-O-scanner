@@ -203,6 +203,12 @@ class StrategyConfig:
     # limits - see RateLimiter in feed_base.py.
     API_CALLS_PER_SECOND: float = _float("API_CALLS_PER_SECOND", 3.0)
     USE_CANDLE_STORE: bool = _bool("USE_CANDLE_STORE", True)
+    # How long a failed quote is allowed to fall back to the last cached one
+    # before that cache is refused instead of silently served as if fresh.
+    # Without a ceiling here, a persistent quote failure (not just a one-off
+    # blip) keeps replaying the same old price under a new timestamp forever -
+    # the dashboard looks live but has quietly stopped tracking the market.
+    QUOTE_CACHE_MAX_AGE_SECONDS: int = _int("QUOTE_CACHE_MAX_AGE_SECONDS", 90)
     # Derive the higher timeframe from stored bars instead of a second request.
     DERIVE_HTF: bool = _bool("DERIVE_HTF", True)
     CANDLE_RETENTION_DAYS: int = _int("CANDLE_RETENTION_DAYS", 30)
