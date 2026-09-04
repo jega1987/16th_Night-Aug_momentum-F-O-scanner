@@ -128,7 +128,8 @@ class IndexScanner:
         self._log_scan(symbol, timeframe, result.meta,
                        passed=result.passed,
                        reason=result.reason,
-                       composite=result.scores.get("composite"))
+                       composite=result.scores.get("composite"),
+                       factors=result.scores)
 
         if not result.passed:
             logger.debug("[Scanner] %s rejected: %s", symbol, result.reason)
@@ -258,7 +259,8 @@ class IndexScanner:
 
     @staticmethod
     def _log_scan(symbol: str, timeframe: str, meta: Dict, passed: bool,
-                  reason: str, composite: float = None) -> None:
+                  reason: str, composite: float = None,
+                  factors: Optional[Dict] = None) -> None:
         try:
             with session_scope() as db:
                 db.add(ScanLog(
@@ -275,6 +277,7 @@ class IndexScanner:
                     composite_score=composite,
                     passed=passed,
                     rejection_reason=None if passed else reason[:250],
+                    factors=factors or None,
                     timestamp=now_naive(),
                 ))
         except Exception as exc:
@@ -282,7 +285,18 @@ class IndexScanner:
 
     # ------------------------------------------------------------------ #
     async def get_index_snapshots(self) -> List[Dict]:
-        """Live index cards for the dashboard."""
+        """
+        Live index cards for the dashboard.
+
+        A quote the feed itself flags as `stale` (Kite failed and this is a
+        replayed cache, see KiteFeed.get_live_quote) is still returned here so
+        the caller can decide, but it is NOT written to index_snapshots. If it
+        were, the row would carry `timestamp=now()` on a price that never
+        actually moved - the card looks freshly updated while quietly showing
+        an old number. Skipping the write leaves the last genuinely live row
+        in place, so its timestamp visibly falls behind and the dashboard can
+        flag it instead of hiding it.
+        """
         async def one(symbol: str):
             quote = await self.feed.get_live_quote(symbol, use_futures=False)
             return {
@@ -296,6 +310,7 @@ class IndexScanner:
                 "change_abs": round(quote["ltp"] - quote["prev_close"], 2),
                 "volume": int(quote.get("volume") or 0),
                 "oi": int(quote.get("oi") or 0),
+                "stale": bool(quote.get("stale", False)),
             }
 
         outcomes = await asyncio.gather(*[one(s) for s in cfg.INDICES], return_exceptions=True)
@@ -304,8 +319,15 @@ class IndexScanner:
             if isinstance(o, Exception):
                 logger.warning("[Scanner] Snapshot failed for %s: %s", symbol, o)
 
-        if snapshots:
+        rows_to_write = []
+        for snap in snapshots:
+            if snap.get("stale"):
+                logger.warning("[Scanner] %s quote is stale - not overwriting last snapshot", snap["symbol"])
+                continue
+            rows_to_write.append({k: v for k, v in snap.items() if k != "stale"})
+
+        if rows_to_write:
             with session_scope() as db:
-                for snap in snapshots:
+                for snap in rows_to_write:
                     db.add(IndexSnapshot(timestamp=now_naive(), **snap))
         return snapshots
