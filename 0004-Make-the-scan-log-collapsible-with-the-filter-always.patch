@@ -1,0 +1,94 @@
+From 179ebd55a141c24bcc166c2e9d538bc5303d56b8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 4 Sep 2026 04:52:51 +0000
+Subject: [PATCH 4/4] Make the scan log collapsible with the filter always in
+ the header
+
+The scan log table (up to 40 rows, now with a Factors column too) was
+always fully rendered on the dashboard, pushing everything below it
+down the page even when nobody was reading it.
+
+- Added a Show/Hide button to the scan log header. The table (and the
+  "showing: X" filter status line) now lives in a collapsed panel by
+  default and only renders open when you actually want to look at it.
+- The symbol filter box and Filter/Clear buttons stay in the header
+  itself, so you can filter without first expanding the table - and
+  submitting a filter opens the panel automatically since you clearly
+  want to see the result.
+- Auto-refresh (every 45s) now also pauses while the log panel is
+  open, same as it already did for an expanded signal row, so a
+  reload doesn't yank the table shut while you're reading it.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TTwCHXT3HSQFTa3kX6yUDc
+---
+ templates/index.html | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/templates/index.html b/templates/index.html
+index 0e704ce..2104e02 100644
+--- a/templates/index.html
++++ b/templates/index.html
+@@ -77,7 +77,7 @@
+ 
+   /* ---------- tables ---------- */
+   section{margin-bottom:22px}
+-  .shead{display:flex; align-items:baseline; gap:10px; margin-bottom:8px}
++  .shead{display:flex; flex-wrap:wrap; align-items:baseline; gap:10px; margin-bottom:8px}
+   table{width:100%; border-collapse:collapse; font-size:12px}
+   th{font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--faint);
+      text-align:right; padding:6px 9px; border-bottom:1px solid var(--rule); font-weight:400; white-space:nowrap}
+@@ -278,7 +278,9 @@
+     {% if scan_symbol_filter %}
+     <a class="btn" href="?tf={{ timeframe }}{% if token %}&token={{ token }}{% endif %}">Clear</a>
+     {% endif %}
++    <button class="btn" type="button" id="logToggle">{% if scan_symbol_filter %}Hide ▴{% else %}Show ▾{% endif %}</button>
+   </form>
++  <div id="logPanel" {% if not scan_symbol_filter %}hidden{% endif %}>
+   {% if scan_symbol_filter %}
+   <div class="lbl" style="margin-bottom:8px">showing: {{ scan_symbol_filter }}</div>
+   {% endif %}
+@@ -321,6 +323,7 @@
+   {% else %}
+   <div class="empty"><b>Nothing scanned yet{% if scan_symbol_filter %} for {{ scan_symbol_filter }}{% endif %}</b>Scans run 20 seconds after every 5-minute candle close, 09:30–15:00 IST. Use “Scan now” to run one immediately.</div>
+   {% endif %}
++  </div>
+ </section>
+ 
+ <footer>
+@@ -332,15 +335,31 @@
+   const qs = token ? ('&token=' + encodeURIComponent(token)) : '';
+   let expanded = false;
+ 
++  const logPanel = document.getElementById('logPanel');
++  function refreshExpanded() {
++    expanded = !!document.querySelector('tr.factors:not([hidden])') ||
++               !!(logPanel && !logPanel.hidden);
++  }
++  refreshExpanded();   // a symbol filter opens the panel on page load too
++
+   document.querySelectorAll('tr.sig').forEach(row => {
+     row.addEventListener('click', () => {
+       const panel = document.getElementById('f' + row.dataset.row);
+       if (!panel) return;
+       panel.hidden = !panel.hidden;
+-      expanded = !!document.querySelector('tr.factors:not([hidden])');
++      refreshExpanded();
+     });
+   });
+ 
++  const logToggle = document.getElementById('logToggle');
++  if (logToggle && logPanel) {
++    logToggle.addEventListener('click', () => {
++      logPanel.hidden = !logPanel.hidden;
++      logToggle.textContent = logPanel.hidden ? 'Show ▾' : 'Hide ▴';
++      refreshExpanded();
++    });
++  }
++
+   const btn = document.getElementById('scan');
+   btn.addEventListener('click', async () => {
+     btn.disabled = true; btn.textContent = 'Scanning…';
+-- 
+2.43.0
+
