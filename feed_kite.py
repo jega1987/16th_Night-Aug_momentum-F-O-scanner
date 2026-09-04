@@ -92,6 +92,7 @@ class KiteFeed(MarketFeed):
         self._instruments: Dict[str, List[Dict]] = {}     # exchange -> rows
         self._token_map: Dict[str, Dict] = {}             # symbol -> instrument row
         self._quote_cache: Dict[str, Dict] = {}
+        self._quote_cache_at: Dict[str, datetime] = {}
         self._chain_cache: Dict = {}
         self._chain_cache_at: Dict = {}
 
@@ -328,6 +329,18 @@ class KiteFeed(MarketFeed):
     # Quotes
     # ------------------------------------------------------------------ #
     async def get_live_quote(self, symbol: str, use_futures: bool = False) -> Dict:
+        """
+        Returns the quote dict with `stale` set. `stale=False` means this call
+        itself just got a live print from Kite. `stale=True` means Kite failed
+        and this is the last good quote, replayed - the caller decides whether
+        that's still useful (a display fallback) or should be treated as "no
+        quote" (anything that persists a timestamp implying freshness).
+
+        The cache is only served for QUOTE_CACHE_MAX_AGE_SECONDS after it was
+        captured. Past that, a *persistent* failure (not a one-off blip) stops
+        being masked as a live price that has simply stopped moving, and starts
+        raising like the failure it is.
+        """
         self._require_connection()
         inst = self._instrument(symbol, use_futures)
         key = f"{inst['exchange']}:{inst['tradingsymbol']}"
@@ -339,12 +352,23 @@ class KiteFeed(MarketFeed):
             quote = _quote_from(row)
             if quote["ltp"] <= 0:
                 raise ValueError(f"quote returned ltp={quote['ltp']}")
+            quote["stale"] = False
             self._quote_cache[symbol] = quote
+            self._quote_cache_at[symbol] = now_naive()
             return quote
         except Exception as exc:
+            cached_at = self._quote_cache_at.get(symbol)
+            age = (now_naive() - cached_at).total_seconds() if cached_at else None
+            if symbol in self._quote_cache and age is not None and age <= cfg.QUOTE_CACHE_MAX_AGE_SECONDS:
+                logger.warning("[Kite] Quote failed for %s (%s) - serving %.0fs-old cache",
+                               symbol, exc, age)
+                stale_quote = dict(self._quote_cache[symbol])
+                stale_quote["stale"] = True
+                return stale_quote
             if symbol in self._quote_cache:
-                logger.warning("[Kite] Quote failed for %s (%s) - serving cached", symbol, exc)
-                return self._quote_cache[symbol]
+                logger.error("[Kite] Quote failed for %s (%s) - cache is %.0fs old, "
+                             "past the %ds ceiling, refusing to serve it as live",
+                             symbol, exc, age or -1, cfg.QUOTE_CACHE_MAX_AGE_SECONDS)
             raise
 
     async def get_oi(self, symbol: str) -> Optional[float]:
