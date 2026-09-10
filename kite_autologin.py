@@ -25,7 +25,7 @@ live only in Railway environment variables, never in the repo.
 import logging
 import re
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from config import cfg
 
@@ -109,45 +109,70 @@ def fetch_request_token() -> str:
         return token
 
 
+MAX_REDIRECT_HOPS = 6
+
+
 def _extract_token(client, login_url: str) -> Optional[str]:
-    """The token surfaces either in the final URL or in a redirect exception."""
+    """
+    Walk the post-twofa redirect chain by hand, one hop at a time, until a
+    request_token shows up in a Location header.
+
+    Kite used to put the token in the very first 302 after skip_session=true.
+    It has since started inserting an extra hop (a confirmation/consent
+    redirect) before the one that actually carries the token to the app's
+    registered redirect URL - a single non-following GET can land on that
+    intermediate hop and see no token, which is exactly the failure this
+    was raising. So this now follows the chain itself, hop by hop, stopping
+    the instant a token appears without ever actually navigating to the
+    app's own redirect URL (which may 404 or require auth).
+    """
     import httpx
 
     url = login_url + ("&" if "?" in login_url else "?") + "skip_session=true"
+    chain: list[str] = []
     try:
-        # Do NOT follow this redirect. The request_token is in the location
-        # header of the 302 to the app's registered redirect URL; following it
-        # would navigate away to that URL (which may 404 or not echo the token)
-        # and lose it.
-        resp = client.get(url, follow_redirects=False)
-        found = _token_from_url(resp.headers.get("location", ""))
-        if found:
-            return found
-        found = _token_from_url(str(resp.url))
-        if found:
-            return found
-        for record in resp.history:
-            found = _token_from_url(record.headers.get("location", ""))
+        for _ in range(MAX_REDIRECT_HOPS):
+            resp = client.get(url, follow_redirects=False)
+            location = resp.headers.get("location", "")
+            chain.append(f"{resp.status_code} {url} -> {location or '(no location)'}")
+
+            found = _token_from_url(location) or _token_from_url(str(resp.url))
             if found:
                 return found
+            for record in resp.history:
+                found = _token_from_url(record.headers.get("location", ""))
+                if found:
+                    return found
+
+            if not location or resp.status_code not in (301, 302, 303, 307, 308):
+                break
+            url = urljoin(url, location)
     except httpx.HTTPError as exc:
         # Some flows raise on the final redirect to a custom scheme; the token
         # is in the exception's URL.
         found = _token_from_url(str(getattr(exc, "request", "")) + " " + str(exc))
         if found:
             return found
+        chain.append(f"<exception: {exc}>")
+
+    # No token found anywhere in the chain - log it so the next failure is
+    # diagnosable from Railway logs alone, without adding more debug code.
+    logger.warning("[AutoLogin] request_token not found after %d redirect hop(s):\n%s",
+                    len(chain), "\n".join(chain))
     return None
 
 
 def _token_from_url(url: str) -> Optional[str]:
     if not url or "request_token" not in url:
         return None
-    try:
-        qs = parse_qs(urlparse(url).query)
-        if qs.get("request_token"):
-            return qs["request_token"][0]
-    except Exception:
-        pass
+    parsed = urlparse(url)
+    for part in (parsed.query, parsed.fragment):
+        try:
+            qs = parse_qs(part)
+            if qs.get("request_token"):
+                return qs["request_token"][0]
+        except Exception:
+            pass
     match = re.search(r"request_token=([A-Za-z0-9]+)", url)
     return match.group(1) if match else None
 
