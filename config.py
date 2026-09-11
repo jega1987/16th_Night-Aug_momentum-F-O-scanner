@@ -280,6 +280,12 @@ class StrategyConfig:
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
+    # Once-a-day Telegram alert with the NIFTY 50 / BANKNIFTY / SENSEX opening
+    # status, sent the first time the scanner is live after the market opens.
+    MARKET_OPEN_ALERT: bool = _bool("MARKET_OPEN_ALERT", True)
+    MARKET_OPEN_ALERT_HOUR: int = _int("MARKET_OPEN_ALERT_HOUR", 9)
+    MARKET_OPEN_ALERT_MINUTE: int = _int("MARKET_OPEN_ALERT_MINUTE", 16)
+
     def __post_init__(self):
         if self.TIMEFRAME not in ("5m", "15m"):
             self.TIMEFRAME = "5m"
