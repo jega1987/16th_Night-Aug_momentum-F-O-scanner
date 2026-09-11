@@ -60,6 +60,7 @@ class AppState:
     stream_started = False
     config_error = None
     warmed_up = False
+    market_open_alert_date = None   # "YYYY-MM-DD" - guards against sending it twice in one day
 
 
 state = AppState()
