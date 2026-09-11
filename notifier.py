@@ -3,7 +3,7 @@ Telegram alerts. Entirely optional - with no bot token configured the notifier
 logs and returns, so nothing else has to care whether it's set up.
 """
 import logging
-from typing import Dict
+from typing import Dict, List
 
 import httpx
 
@@ -83,3 +83,22 @@ class Notifier:
 
     async def send_error(self, where: str, detail: str) -> bool:
         return await self.send(f"\u26a0\ufe0f <b>Scanner problem</b>\n{where}\n<code>{detail[:400]}</code>")
+
+    async def send_market_open(self, snapshots: List[Dict]) -> bool:
+        """Once-a-day 'scanner is live' ping with the index opening status."""
+        if not snapshots:
+            return await self.send(
+                "\U0001F514 <b>Market Open</b>\n"
+                "Scanner is live, but no index quotes came back yet - "
+                "check /health.")
+        lines = ["\U0001F514 <b>Market Open</b>"]
+        for s in snapshots:
+            up = (s.get("change_abs") or 0) >= 0
+            arrow = "\u25b2" if up else "\u25bc"
+            sign = "+" if up else ""
+            lines.append(
+                f"{arrow} <b>{s['symbol']}</b>  {s['ltp']:,.2f}  "
+                f"({sign}{s['change_abs']:,.2f} / {sign}{s['change_pct']:.2f}%)"
+            )
+        lines.append("\n<i>Scanner is live for the session.</i>")
+        return await self.send("\n".join(lines))
