@@ -278,7 +278,7 @@ class StrategyConfig:
 
     # ---------- notifications ----------
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    TELEGRAM_CHAT_ID: int = int(os.getenv("TELEGRAM_CHAT_ID", "0") or "0")
 
     # Once-a-day Telegram alert with the NIFTY 50 / BANKNIFTY / SENSEX opening
     # status, sent the first time the scanner is live after the market opens.
