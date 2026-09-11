@@ -200,6 +200,31 @@ async def job_auto_login():
         await notifier.send_error("Kite auto-login", f"[{step}] {exc}")
 
 
+async def job_market_open_alert():
+    """
+    Once-a-day 'scanner is live' ping to Telegram with the NIFTY 50 /
+    BANKNIFTY / SENSEX opening status, fired shortly after the market opens.
+
+    Guarded by a date stamp on state rather than relying on the cron firing
+    exactly once - a redeploy or restart around 09:16 IST should not double
+    -send it.
+    """
+    if not cfg.MARKET_OPEN_ALERT or not MarketClock.is_market_day():
+        return
+    today = now_naive().date().isoformat()
+    if state.market_open_alert_date == today:
+        return
+    if not state.feed_connected and not await connect_feed():
+        return
+    try:
+        snapshots = await scanner.get_index_snapshots()
+        await notifier.send_market_open(snapshots)
+        state.market_open_alert_date = today
+    except Exception as exc:
+        logger.error("[MarketOpen] Alert failed: %s", exc)
+        await notifier.send_error("Market open alert", str(exc))
+
+
 async def job_manage_stream():
     """
     Own the streaming connection across the session: start it once the market
@@ -261,6 +286,14 @@ def register_jobs():
                                       hour=cfg.KITE_AUTO_LOGIN_HOUR,
                                       minute=cfg.KITE_AUTO_LOGIN_MINUTE, timezone=IST),
                           id="autologin", replace_existing=True)
+    if cfg.MARKET_OPEN_ALERT:
+        # A couple of minutes after the 09:15 open, so the feed has a real
+        # first tick rather than yesterday's stale close.
+        scheduler.add_job(job_market_open_alert,
+                          CronTrigger(day_of_week="mon-fri",
+                                      hour=cfg.MARKET_OPEN_ALERT_HOUR,
+                                      minute=cfg.MARKET_OPEN_ALERT_MINUTE, timezone=IST),
+                          id="market_open_alert", replace_existing=True)
     # Two universe builds. The 08:30 pass ranks on momentum and price (no
     # volume exists yet); the 09:45 pass re-ranks with half an hour of real
     # turnover behind it, which is what the liquidity floor actually needs.
@@ -305,6 +338,8 @@ async def warm_up() -> None:
             await job_build_universe()      # cold start - don't wait for tomorrow
         if cfg.RUN_SCHEDULER:
             await job_manage_stream()       # boot mid-session: don't wait a minute
+        if state.feed_connected and MarketClock.is_market_open():
+            await job_market_open_alert()   # boot after the open - don't wait for 09:16
     except Exception as exc:
         state.feed_error = str(exc)
         logger.exception("[Startup] Warm-up failed: %s", exc)
