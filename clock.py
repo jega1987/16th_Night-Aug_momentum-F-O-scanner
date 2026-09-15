@@ -56,8 +56,9 @@ class MarketClock:
         # HOLIDAYS below if you want the scanner to stay quiet on those days.
         return dt.weekday() < 5 and dt.date().isoformat() not in cls.HOLIDAYS
 
-    # Extend this list each year from the exchange holiday circular.
-    HOLIDAYS = set()
+    # From MARKET_HOLIDAYS in config (ISO dates). Extend it each year from
+    # the exchange holiday circular.
+    HOLIDAYS = {d.strip() for d in cfg.MARKET_HOLIDAYS if d.strip()}
 
     @classmethod
     def is_market_open(cls, dt: datetime = None) -> bool:

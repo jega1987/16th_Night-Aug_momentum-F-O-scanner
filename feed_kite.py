@@ -298,7 +298,12 @@ class KiteFeed(MarketFeed):
         inst = self._instrument(symbol, use_futures)
         token = int(inst["instrument_token"])
 
-        to_dt = datetime.now()
+        # IST, not the container clock. Railway runs UTC, and Kite reads a
+        # naive datetime as exchange time, so datetime.now() here asks for
+        # candles "up to 06:55 IST" at 12:25 IST - a window that excludes the
+        # whole of today's session. Yesterday's bars usually hide that; the
+        # day after a holiday the window is empty and every REST fetch fails.
+        to_dt = now_naive()
         if from_date is None:
             per_day = {"minute": 375, "3minute": 125, "5minute": 75, "10minute": 38,
                        "15minute": 25, "30minute": 13, "60minute": 7, "day": 1}[kite_interval]

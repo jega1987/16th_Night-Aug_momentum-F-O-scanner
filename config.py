@@ -143,6 +143,11 @@ class StrategyConfig:
         )
     )
 
+    # Exchange holidays, ISO dates, comma-separated. The scanner and the
+    # square-off job stay idle on these. Extend it each year from the NSE
+    # holiday circular, e.g. MARKET_HOLIDAYS=2026-10-02,2026-10-20,2026-11-05
+    MARKET_HOLIDAYS: List[str] = field(default_factory=lambda: _list("MARKET_HOLIDAYS", []))
+
     # ---------- signal window & bar integrity ----------
     # Entries are allowed between these IST times. 09:45 skips the opening
     # rotation, where a 6-bar squeeze can only exist by spanning the overnight
