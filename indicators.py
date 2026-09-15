@@ -125,6 +125,29 @@ def squeeze_range(df: pd.DataFrame, in_squeeze: pd.Series, duration: pd.Series,
     return float(window["high"].max()), float(window["low"].min())
 
 
+def squeeze_bounds(in_squeeze: pd.Series, duration: pd.Series):
+    """
+    (start_index, end_index) of the most recent squeeze, as positional
+    indices into the frame, or None if no squeeze is on record. Uses the same
+    walk as squeeze_range so the two always describe the same coil.
+    """
+    sq = in_squeeze.to_numpy(dtype=bool)
+    idx = np.flatnonzero(sq)
+    if idx.size == 0:
+        return None
+    end = int(idx[-1])
+    dur = int(duration.iloc[end]) or 1
+    return max(0, end - dur + 1), end
+
+
+def squeeze_start_timestamp(df: pd.DataFrame, in_squeeze: pd.Series, duration: pd.Series):
+    """Timestamp of the first bar of the most recent squeeze, or None."""
+    bounds = squeeze_bounds(in_squeeze, duration)
+    if bounds is None or "timestamp" not in df.columns:
+        return None
+    return pd.Timestamp(df["timestamp"].iloc[bounds[0]])
+
+
 def supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0):
     """
     Supertrend(10, 3). Returns (line, direction) where direction is +1 for an

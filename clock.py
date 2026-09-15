@@ -7,7 +7,18 @@ from datetime import datetime, time, timedelta
 
 import pytz
 
+from config import cfg
+
 IST = pytz.timezone("Asia/Kolkata")
+
+
+def _parse_time(raw: str, default: time) -> time:
+    """'09:45' -> time(9, 45). Anything malformed falls back to the default."""
+    try:
+        hh, mm = (int(x) for x in str(raw).strip().split(":")[:2])
+        return time(hh, mm)
+    except (TypeError, ValueError):
+        return default
 
 
 def now_ist() -> datetime:
@@ -27,8 +38,11 @@ def today_start() -> datetime:
 class MarketClock:
     MARKET_OPEN = time(9, 15)
     MARKET_CLOSE = time(15, 30)
-    SIGNAL_START = time(9, 30)   # skip the opening auction noise
-    SIGNAL_END = time(15, 0)     # no fresh entries into the close
+    # Entry window, from SIGNAL_START_TIME / SIGNAL_END_TIME in config. The
+    # defaults skip the opening rotation and stop fresh entries early enough
+    # that a 4R target has more than an hour before the square-off bell.
+    SIGNAL_START = _parse_time(cfg.SIGNAL_START_TIME, time(9, 45))
+    SIGNAL_END = _parse_time(cfg.SIGNAL_END_TIME, time(14, 15))
     SQUARE_OFF = time(15, 20)
 
     @classmethod

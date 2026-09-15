@@ -265,6 +265,18 @@ class KiteFeed(MarketFeed):
             return row
         raise KeyError(f"No Kite instrument for '{symbol}'")
 
+    def lot_size(self, symbol: str) -> int:
+        """
+        Lot size from the instruments dump for the nearest future - the figure
+        the exchange actually trades in. Config's static table is only the
+        fallback when the contract is not in the dump.
+        """
+        try:
+            lot = int(self._instrument(symbol, use_futures=True).get("lot_size") or 0)
+        except Exception:
+            lot = 0
+        return lot or cfg.lot_size(symbol)
+
     def _find_equity(self, symbol: str, use_futures: bool) -> Optional[Dict]:
         if use_futures:
             return self._nearest_future(symbol)

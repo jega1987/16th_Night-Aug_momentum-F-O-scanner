@@ -29,37 +29,38 @@ class SignalEngine:
 
     # ------------------------------------------------------------------ #
     def calculate_levels(self, setup: Dict) -> Optional[Dict]:
-        """ATR-derived stop and targets, plus a lot-rounded quantity."""
+        """
+        Stop at a market level, targets in multiples of that stop, quantity
+        from the capital the trade ties up. The stop never looks at the
+        account; the account only decides how many lots ride behind it.
+        """
         entry = float(setup["entry"])
         atr_val = float(setup["atr"])
         symbol = setup["symbol"]
         sign = 1 if setup["direction"] == "LONG" else -1
 
-        sl_dist = atr_val * cfg.sl_mult(symbol)
+        sl_dist, sl_basis = self._stop_distance(setup, entry, atr_val, symbol)
         max_sl_pct = cfg.max_sl_pct(symbol)
         if sl_dist <= 0:
             return None
         if (sl_dist / entry) * 100 > max_sl_pct:
-            logger.info("[Engine] %s skipped - stop is %.2f%% away, cap is %.2f%%",
-                        symbol, (sl_dist / entry) * 100, max_sl_pct)
+            logger.info("[Engine] %s skipped - stop is %.2f%% away (%s), cap is %.2f%%",
+                        symbol, (sl_dist / entry) * 100, sl_basis, max_sl_pct)
             return None
 
-        lot = cfg.lot_size(symbol)
-        risk_budget = cfg.ACCOUNT_BALANCE * (cfg.RISK_PER_TRADE_PCT / 100)
-        lots = math.floor((risk_budget / sl_dist) / lot)
-        if lots < 1:
-            logger.info("[Engine] %s skipped - one lot risks more than %.2f%% of the account",
-                        symbol, cfg.RISK_PER_TRADE_PCT)
+        lot = int(setup.get("lot_size") or 0) or cfg.lot_size(symbol)
+        sized = self._size(symbol, entry, sl_dist, lot)
+        if not sized:
             return None
+        lots, qty, risk_pct, size_basis = sized
 
-        qty = lots * lot
-        risk_pct = (qty * sl_dist / cfg.ACCOUNT_BALANCE) * 100
-        if risk_pct > cfg.MAX_RISK_PER_TRADE_PCT:
-            lots = math.floor((cfg.ACCOUNT_BALANCE * cfg.MAX_RISK_PER_TRADE_PCT / 100) / (sl_dist * lot))
-            if lots < 1:
-                return None
-            qty = lots * lot
-            risk_pct = (qty * sl_dist / cfg.ACCOUNT_BALANCE) * 100
+        if cfg.TARGET_MODE == "atr":
+            t1 = atr_val * cfg.ATR_TP1_MULT
+            t2 = atr_val * cfg.ATR_TP2_MULT
+            t3 = atr_val * cfg.ATR_TP3_MULT
+        else:
+            r1, r2, r3 = cfg.TARGET_R_MULTS
+            t1, t2, t3 = sl_dist * r1, sl_dist * r2, sl_dist * r3
 
         strike = atm_strike(entry, cfg.strike_step(symbol))
         opt_type = "CE" if setup["direction"] == "LONG" else "PE"
@@ -67,15 +68,99 @@ class SignalEngine:
         return {
             "entry": round(entry, 2),
             "sl": round(entry - sign * sl_dist, 2),
-            "tp1": round(entry + sign * atr_val * cfg.ATR_TP1_MULT, 2),
-            "tp2": round(entry + sign * atr_val * cfg.ATR_TP2_MULT, 2),
-            "tp3": round(entry + sign * atr_val * cfg.ATR_TP3_MULT, 2),
+            "tp1": round(entry + sign * t1, 2),
+            "tp2": round(entry + sign * t2, 2),
+            "tp3": round(entry + sign * t3, 2),
             "qty": qty,
             "lots": lots,
             "risk_pct": round(risk_pct, 3),
+            "sl_basis": sl_basis,
+            "size_basis": size_basis,
             "atm_strike": strike,
             "option_hint": f"{symbol.split()[0]} {strike} {opt_type}",
         }
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _stop_distance(setup: Dict, entry: float, atr_val: float, symbol: str):
+        """
+        The widest of four market-derived distances. Returns (distance, basis)
+        where basis names the rule that set it, so a post-mortem can see which
+        floor actually places the stops.
+
+        A squeeze compresses the 5-minute ATR by construction, so an ATR-only
+        stop lands inside the noise the release is about to create. Half the
+        coil, the higher-timeframe ATR and a % of price are the other three
+        candidates; whichever is widest wins.
+        """
+        candidates = {"atr": atr_val * cfg.sl_mult(symbol)}
+
+        hi, lo = setup.get("squeeze_high"), setup.get("squeeze_low")
+        if hi is not None and lo is not None and float(hi) > float(lo):
+            candidates["range"] = (float(hi) - float(lo)) * cfg.SL_RANGE_FRACTION
+
+        atr_htf = setup.get("atr_htf")
+        if atr_htf:
+            candidates["htf_atr"] = float(atr_htf) * cfg.SL_HTF_ATR_MULT
+
+        candidates["min_pct"] = entry * cfg.min_sl_pct(symbol) / 100
+
+        basis = max(candidates, key=candidates.get)
+        dist = candidates[basis]
+        detail = ", ".join(f"{k} {v:.2f}" for k, v in candidates.items())
+        return dist, f"{basis} ({detail})"
+
+    @staticmethod
+    def _size(symbol: str, entry: float, sl_dist: float, lot: int):
+        """
+        Lots for the trade. Returns (lots, qty, risk_pct, basis) or None.
+
+        notional: lots = CAPITAL_PER_TRADE / (one lot's margin). The stop is
+                  already fixed by the market, so the rupee loss on a stop-out
+                  is whatever that distance times this quantity comes to; it
+                  is reported as risk_pct, not enforced.
+        risk:     lots chosen so a stop-out costs RISK_PER_TRADE_PCT of the
+                  account, capped at MAX_RISK_PER_TRADE_PCT.
+        """
+        if lot <= 0:
+            logger.info("[Engine] %s skipped - lot size unknown", symbol)
+            return None
+
+        if cfg.SIZING_MODE == "risk":
+            risk_budget = cfg.ACCOUNT_BALANCE * (cfg.RISK_PER_TRADE_PCT / 100)
+            lots = math.floor((risk_budget / sl_dist) / lot)
+            if lots < 1:
+                logger.info("[Engine] %s skipped - one lot risks more than %.2f%% of the account",
+                            symbol, cfg.RISK_PER_TRADE_PCT)
+                return None
+            qty = lots * lot
+            risk_pct = (qty * sl_dist / cfg.ACCOUNT_BALANCE) * 100
+            if risk_pct > cfg.MAX_RISK_PER_TRADE_PCT:
+                lots = math.floor((cfg.ACCOUNT_BALANCE * cfg.MAX_RISK_PER_TRADE_PCT / 100)
+                                  / (sl_dist * lot))
+                if lots < 1:
+                    return None
+                qty = lots * lot
+                risk_pct = (qty * sl_dist / cfg.ACCOUNT_BALANCE) * 100
+            basis = f"risk {cfg.RISK_PER_TRADE_PCT:.1f}% of {cfg.ACCOUNT_BALANCE:,.0f}"
+        else:
+            margin_per_lot = entry * lot * cfg.margin_pct(symbol) / 100
+            if margin_per_lot <= 0:
+                return None
+            lots = math.floor(cfg.CAPITAL_PER_TRADE / margin_per_lot)
+            if cfg.MAX_LOTS_PER_TRADE > 0:
+                lots = min(lots, cfg.MAX_LOTS_PER_TRADE)
+            if lots < 1:
+                logger.info("[Engine] %s skipped - one lot needs ~Rs %.0f margin, "
+                            "CAPITAL_PER_TRADE is Rs %.0f",
+                            symbol, margin_per_lot, cfg.CAPITAL_PER_TRADE)
+                return None
+            qty = lots * lot
+            risk_pct = (qty * sl_dist / cfg.ACCOUNT_BALANCE) * 100
+            basis = (f"notional {cfg.CAPITAL_PER_TRADE:,.0f} / margin {margin_per_lot:,.0f} per lot "
+                     f"@ {cfg.margin_pct(symbol):.0f}%")
+
+        return lots, qty, risk_pct, basis
 
     # ------------------------------------------------------------------ #
     async def create_signal(self, setup: Dict) -> Optional[Dict]:
@@ -135,7 +220,12 @@ class SignalEngine:
                 score_adx=scores.get("adx"),
                 score_htf=scores.get("htf"),
                 composite_score=scores.get("composite"),
-                factor_breakdown={**scores, **setup.get("meta", {})},
+                factor_breakdown={**scores, **setup.get("meta", {}),
+                                  "sl_basis": levels.get("sl_basis"),
+                                  "size_basis": levels.get("size_basis"),
+                                  "risk_pct": levels.get("risk_pct"),
+                                  "bar_close": setup.get("bar_close"),
+                                  "atr_htf": setup.get("atr_htf")},
                 status="OPEN", realized_pnl=0.0, pnl=0.0,
                 mfe=levels["entry"],
                 triggered_by=setup.get("triggered_by", "scanner"),
@@ -147,9 +237,12 @@ class SignalEngine:
         if plan:
             payload["option_plan"] = plan.to_dict()
 
-        logger.info("[Engine] %s %s @ %.2f | SL %.2f | TP %.2f/%.2f/%.2f | %d qty | %s%s",
+        logger.info("[Engine] %s %s @ %.2f | SL %.2f (%s) | TP %.2f/%.2f/%.2f | %d qty = %d lots "
+                    "(%s) | risk %.2f%% | %s%s",
                     payload["symbol"], payload["direction"], payload["entry"], payload["sl"],
-                    payload["tp1"], payload["tp2"], payload["tp3"], payload["qty"],
+                    levels.get("sl_basis", "").split(" (")[0],
+                    payload["tp1"], payload["tp2"], payload["tp3"], payload["qty"], payload["lots"],
+                    levels.get("size_basis", ""), levels.get("risk_pct", 0.0),
                     payload["option_hint"],
                     f" | OPTION BLOCKED: {plan.block_reason}" if plan and plan.blocked else "")
 

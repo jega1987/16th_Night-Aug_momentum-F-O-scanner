@@ -67,6 +67,15 @@ class MarketFeed(ABC):
         """Current open interest for the tracked contract, or None."""
         return None
 
+    def lot_size(self, symbol: str) -> int:
+        """
+        Contract lot size for the symbol's nearest future. The base feed has
+        no scrip master, so it answers from config; a broker feed overrides
+        this with the exchange's figure, which is what sizing must use.
+        """
+        from config import cfg
+        return cfg.lot_size(symbol)
+
     async def get_fno_stocks(self) -> List[Dict]:
         """
         Stock futures from the scrip master, nearest expiry only.

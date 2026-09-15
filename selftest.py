@@ -549,8 +549,17 @@ async def main() -> int:
         failures += not check("quantity is a whole number of lots",
                               levels["qty"] % cfg.lot_size(sample["symbol"]) == 0,
                               f"{levels['qty']} qty / {levels['lots']} lots")
-        failures += not check("risk within cap", levels["risk_pct"] <= cfg.MAX_RISK_PER_TRADE_PCT,
-                              f"{levels['risk_pct']}%")
+        if cfg.SIZING_MODE == "risk":
+            failures += not check("risk within cap", levels["risk_pct"] <= cfg.MAX_RISK_PER_TRADE_PCT,
+                                  f"{levels['risk_pct']}%")
+        else:
+            print(f"        sizing: {levels['lots']} lots, {levels['size_basis']} -> "
+                  f"stop-out costs {levels['risk_pct']:.2f}% of the account")
+        # The first target must pay more than a stop costs, or the payoff
+        # cannot carry a realistic win rate.
+        r1 = abs(levels["tp1"] - levels["entry"]) / (abs(levels["entry"] - levels["sl"]) or 1e-9)
+        failures += not check("TP1 is at least 1R from entry", r1 >= 1.0 - 1e-6,
+                              f"TP1 at {r1:.2f}R ({levels['sl_basis']})")
 
     created = await engine.create_signal(sample)
     failures += not check("signal persisted", created is not None and created.get("id"))

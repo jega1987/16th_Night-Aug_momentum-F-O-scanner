@@ -37,6 +37,16 @@ def _list(key: str, default: List[str]) -> List[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
+def _floats(key: str, default: List[float]) -> List[float]:
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return list(default)
+    try:
+        return [float(x) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        return list(default)
+
+
 def _json(key: str, default: dict) -> dict:
     raw = os.getenv(key, "").strip()
     if not raw:
@@ -133,18 +143,74 @@ class StrategyConfig:
         )
     )
 
-    # ---------- risk ----------
-    ACCOUNT_BALANCE: float = _float("ACCOUNT_BALANCE", 1_000_000)
-    RISK_PER_TRADE_PCT: float = _float("RISK_PER_TRADE_PCT", 1.0)
-    MAX_RISK_PER_TRADE_PCT: float = _float("MAX_RISK_PER_TRADE_PCT", 2.0)
+    # ---------- signal window & bar integrity ----------
+    # Entries are allowed between these IST times. 09:45 skips the opening
+    # rotation, where a 6-bar squeeze can only exist by spanning the overnight
+    # gap; 14:15 leaves a 4R target at least an hour before the 15:20 bell.
+    SIGNAL_START_TIME: str = os.getenv("SIGNAL_START_TIME", "09:45")
+    SIGNAL_END_TIME: str = os.getenv("SIGNAL_END_TIME", "14:15")
+    # Score closed candles only. Kite's historical endpoint and the websocket
+    # builder both hand over the bar that is still forming; scanning it means
+    # the "breakout close" is a 20-second print and the volume gate compares
+    # a sliver of a bar against a 20-bar average of whole ones.
+    SCAN_CLOSED_BARS_ONLY: bool = _bool("SCAN_CLOSED_BARS_ONLY", True)
+    # The coil must start and end in today's session. Bollinger and Keltner
+    # measured across yesterday's close and today's open describe nothing.
+    REQUIRE_INTRADAY_SQUEEZE: bool = _bool("REQUIRE_INTRADAY_SQUEEZE", True)
+    # With closed-bar scanning the entry is the live price, not the bar close.
+    # If price has already run more than this many ATRs past the closed bar's
+    # close, the breakout is being chased and the setup is skipped.
+    MAX_ENTRY_SLIP_ATR: float = _float("MAX_ENTRY_SLIP_ATR", 1.0)
+
+    # ---------- stop placement ----------
+    # The stop is a MARKET level, never a rupee amount. It sits at the widest
+    # of four distances from entry, so a squeeze-compressed ATR can no longer
+    # put the stop inside the noise the expansion is about to create:
+    #   ATR_SL_MULT x ATR(5m)              the original rule
+    #   SL_RANGE_FRACTION x squeeze range  half the coil
+    #   SL_HTF_ATR_MULT x ATR(15m)         the higher timeframe is not compressed
+    #   MIN_SL_PCT x price                 an absolute floor in % of price
+    # MAX_SL_DISTANCE_PCT stays as the ceiling: wider than that, no trade.
     ATR_LENGTH: int = _int("ATR_LENGTH", 14)
-    ATR_SL_MULT: float = _float("ATR_SL_MULT", 1.5)
+    ATR_SL_MULT: float = _float("ATR_SL_MULT", 2.0)
+    SL_RANGE_FRACTION: float = _float("SL_RANGE_FRACTION", 0.5)
+    SL_HTF_ATR_MULT: float = _float("SL_HTF_ATR_MULT", 1.0)
+    MIN_SL_PCT: float = _float("MIN_SL_PCT", 0.25)          # indices
+    EQ_MIN_SL_PCT: float = _float("EQ_MIN_SL_PCT", 0.6)     # stocks
+    MAX_SL_DISTANCE_PCT: float = _float("MAX_SL_DISTANCE_PCT", 2.0)
+
+    # ---------- targets ----------
+    # "risk": targets are multiples of the stop distance (R). TP1 at 1.5R
+    #         means the first partial pays more than a full stop costs.
+    # "atr":  the previous behaviour - targets at ATR multiples regardless of
+    #         where the stop is, which produced 0.5R first targets.
+    TARGET_MODE: str = os.getenv("TARGET_MODE", "risk").strip().lower()
+    TARGET_R_MULTS: List[float] = field(default_factory=lambda: _floats("TARGET_R_MULTS", [1.5, 2.5, 4.0]))
     ATR_TP1_MULT: float = _float("ATR_TP1_MULT", 1.0)
     ATR_TP2_MULT: float = _float("ATR_TP2_MULT", 2.0)
     ATR_TP3_MULT: float = _float("ATR_TP3_MULT", 3.0)
-    MAX_SL_DISTANCE_PCT: float = _float("MAX_SL_DISTANCE_PCT", 2.0)
     # Scale-out fractions at TP1 / TP2 / runner. Must sum to 1.0.
-    SCALE_OUT: List[float] = field(default_factory=lambda: [0.33, 0.33, 0.34])
+    # Override with SCALE_OUT=0.5,0.3,0.2
+    SCALE_OUT: List[float] = field(default_factory=lambda: _floats("SCALE_OUT", [0.5, 0.3, 0.2]))
+
+    # ---------- position sizing ----------
+    # "notional": lots = CAPITAL_PER_TRADE / margin for one lot, where margin
+    #             is MARGIN_PCT of contract value. The rupee loss on a stop
+    #             then follows the market distance, not the other way round.
+    # "risk":     the previous behaviour - lots chosen so a stop-out costs
+    #             RISK_PER_TRADE_PCT of ACCOUNT_BALANCE.
+    SIZING_MODE: str = os.getenv("SIZING_MODE", "notional").strip().lower()
+    CAPITAL_PER_TRADE: float = _float("CAPITAL_PER_TRADE", 250_000)
+    # Approximate intraday futures margin as % of contract value. Index ~12%,
+    # stock futures 15-25% depending on the scrip. Verify against your broker.
+    MARGIN_PCT: float = _float("MARGIN_PCT", 12.0)
+    EQ_MARGIN_PCT: float = _float("EQ_MARGIN_PCT", 20.0)
+    MAX_LOTS_PER_TRADE: int = _int("MAX_LOTS_PER_TRADE", 0)    # 0 = no cap
+    # Used by SIZING_MODE=risk, and for the informational risk % on every
+    # signal in either mode.
+    ACCOUNT_BALANCE: float = _float("ACCOUNT_BALANCE", 1_000_000)
+    RISK_PER_TRADE_PCT: float = _float("RISK_PER_TRADE_PCT", 1.0)
+    MAX_RISK_PER_TRADE_PCT: float = _float("MAX_RISK_PER_TRADE_PCT", 2.0)
     # Index-futures costs: exchange txn charges + GST + stamp are roughly
     # 0.005% of turnover per side, plus flat brokerage per leg. Options on
     # premium cost far more - raise these if you track option P&L.
@@ -234,7 +300,7 @@ class StrategyConfig:
     EQ_VOLUME_MULT: float = _float("EQ_VOLUME_MULT", 2.0)
     EQ_ADX_THRESHOLD: float = _float("EQ_ADX_THRESHOLD", 25.0)
     EQ_MIN_COMPOSITE: float = _float("EQ_MIN_COMPOSITE", 0.75)
-    EQ_ATR_SL_MULT: float = _float("EQ_ATR_SL_MULT", 2.0)
+    EQ_ATR_SL_MULT: float = _float("EQ_ATR_SL_MULT", 2.5)
     EQ_MAX_SL_DISTANCE_PCT: float = _float("EQ_MAX_SL_DISTANCE_PCT", 3.0)
 
     # ---------- websocket streaming ----------
@@ -290,6 +356,24 @@ class StrategyConfig:
         if self.TIMEFRAME not in ("5m", "15m"):
             self.TIMEFRAME = "5m"
         self.BAR_MINUTES = 5 if self.TIMEFRAME == "5m" else 15
+        if self.TARGET_MODE not in ("risk", "atr"):
+            self.TARGET_MODE = "risk"
+        if self.SIZING_MODE not in ("notional", "risk"):
+            self.SIZING_MODE = "notional"
+        # Three ascending target multiples, or the default.
+        if len(self.TARGET_R_MULTS) != 3 or any(m <= 0 for m in self.TARGET_R_MULTS) \
+                or self.TARGET_R_MULTS != sorted(self.TARGET_R_MULTS):
+            self.TARGET_R_MULTS = [1.5, 2.5, 4.0]
+        # Three fractions that add to one, or the default.
+        if len(self.SCALE_OUT) != 3 or any(f < 0 for f in self.SCALE_OUT) \
+                or abs(sum(self.SCALE_OUT) - 1.0) > 0.01:
+            self.SCALE_OUT = [0.5, 0.3, 0.2]
+
+    def min_sl_pct(self, symbol: str) -> float:
+        return self.MIN_SL_PCT if self.is_index(symbol) else self.EQ_MIN_SL_PCT
+
+    def margin_pct(self, symbol: str) -> float:
+        return self.MARGIN_PCT if self.is_index(symbol) else self.EQ_MARGIN_PCT
 
     def set_timeframe(self, tf: str) -> None:
         if tf in ("5m", "15m"):

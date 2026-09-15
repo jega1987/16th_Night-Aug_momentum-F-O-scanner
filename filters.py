@@ -11,7 +11,7 @@ from typing import Dict, Optional, Tuple
 import pandas as pd
 
 from indicators import (adx, atr, bars_since, detect_squeeze, ema, rsi,
-                        squeeze_range, swing_points)
+                        squeeze_range, squeeze_start_timestamp, swing_points)
 
 
 @dataclass
@@ -61,7 +61,12 @@ class FilterEngine:
             "squeeze_high": round(hi, 2),
             "squeeze_low": round(lo, 2),
             "close": float(latest["close"]),
+            # The breakout bar's own extremes - a structural stop reference.
+            "bar_high": float(latest["high"]),
+            "bar_low": float(latest["low"]),
         })
+        if "timestamp" in df.columns:
+            res.meta["bar_time"] = str(latest["timestamp"])
 
         # 1. Squeeze must have actually released recently ------------------
         res.scores["squeeze"] = 1.0 if since_fire <= cfg.MAX_BARS_SINCE_FIRE else 0.0
@@ -69,6 +74,19 @@ class FilterEngine:
             res.reason = ("Still compressing" if in_sqz.iloc[-1]
                           else f"No squeeze release in last {cfg.MAX_BARS_SINCE_FIRE} bars")
             return res
+
+        # 1b. ...and the coil has to belong to this session. A squeeze that
+        # started yesterday afternoon and "released" on today's opening bar is
+        # an overnight gap wearing a Bollinger band, not a compression.
+        if cfg.REQUIRE_INTRADAY_SQUEEZE and "timestamp" in df.columns:
+            started = squeeze_start_timestamp(df, in_sqz, sqz_dur)
+            last_ts = pd.Timestamp(latest["timestamp"])
+            if started is not None:
+                res.meta["squeeze_start"] = started.strftime("%d-%m %H:%M")
+                if started.date() != last_ts.date():
+                    res.scores["squeeze"] = 0.0
+                    res.reason = f"Squeeze spans the previous session (began {started:%d-%m %H:%M})"
+                    return res
 
         # 2. Direction: close outside the compression range ----------------
         close = float(latest["close"])

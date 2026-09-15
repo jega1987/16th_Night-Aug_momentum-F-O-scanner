@@ -15,6 +15,7 @@ from clock import MarketClock, now_naive, today_start
 from config import cfg
 from database import IndexSnapshot, OISnapshot, ScanLog, Signal, session_scope
 from feed_base import MarketFeed
+from feed_ws import _floor_to_bar
 from filters import FilterEngine
 from indicators import atr, bars_since, daily_change_pct, detect_squeeze
 
@@ -103,6 +104,15 @@ class IndexScanner:
         else:
             df = await self.feed.get_historical(symbol, timeframe, cfg.HISTORY_BARS, use_futures=True)
 
+        # Only closed candles are scored. The last row from Kite (and from the
+        # websocket builder) is the bar still forming; judged 20 seconds in,
+        # its close is a print and its volume is a sliver.
+        if cfg.SCAN_CLOSED_BARS_ONLY:
+            df, why = self._closed_bars_only(df)
+            if why:
+                self._log_scan(symbol, timeframe, {}, passed=False, reason=why)
+                return None
+
         htf = None
         if cfg.HTF_ALIGNMENT:
             htf = await self._higher_timeframe(symbol, df)
@@ -144,18 +154,105 @@ class IndexScanner:
         if atr_val <= 0:
             return None
 
+        # Higher-timeframe ATR: one of the floors under the stop. The 5-minute
+        # ATR is at its cycle low right after a squeeze; the 15-minute one is
+        # not compressed to the same degree.
+        atr_htf = None
+        if htf is not None and len(htf) >= cfg.ATR_LENGTH + 2:
+            try:
+                atr_htf = round(float(atr(htf, cfg.ATR_LENGTH).iloc[-1]), 2)
+            except Exception:
+                atr_htf = None
+
+        # Entry is the live price, because the bar we just scored is closed.
+        bar_close = float(latest["close"])
+        entry = bar_close
+        if cfg.SCAN_CLOSED_BARS_ONLY and MarketClock.is_market_open():
+            entry = await self._live_entry(symbol, bar_close)
+            slip = abs(entry - bar_close)
+            if slip > cfg.MAX_ENTRY_SLIP_ATR * atr_val:
+                reason = (f"Already ran {slip:.2f} ({slip / atr_val:.1f} ATR) past the "
+                          f"closed bar - not chasing")
+                self._log_scan(symbol, timeframe, result.meta, passed=False, reason=reason,
+                               composite=result.scores.get("composite"), factors=result.scores)
+                return None
+            hi, lo = result.meta.get("squeeze_high"), result.meta.get("squeeze_low")
+            back_inside = ((result.direction == "LONG" and hi is not None and entry <= hi) or
+                           (result.direction == "SHORT" and lo is not None and entry >= lo))
+            if back_inside:
+                reason = f"Live price {entry:.2f} is back inside the squeeze range"
+                self._log_scan(symbol, timeframe, result.meta, passed=False, reason=reason,
+                               composite=result.scores.get("composite"), factors=result.scores)
+                return None
+
+        lot_size = 0
+        try:
+            lot_size = int(self.feed.lot_size(symbol) or 0)
+        except Exception as exc:
+            logger.debug("[Scanner] %s lot size unavailable from feed: %s", symbol, exc)
+
         return {
             "symbol": symbol,
             "timeframe": timeframe,
             "direction": result.direction,
-            "entry": round(float(latest["close"]), 2),
+            "entry": round(entry, 2),
+            "bar_close": round(bar_close, 2),
             "atr": round(atr_val, 2),
+            "atr_htf": atr_htf,
+            "squeeze_high": result.meta.get("squeeze_high"),
+            "squeeze_low": result.meta.get("squeeze_low"),
+            "bar_high": result.meta.get("bar_high"),
+            "bar_low": result.meta.get("bar_low"),
+            "lot_size": lot_size,
             "scores": result.scores,
             "meta": result.meta,
             "composite_score": result.scores.get("composite", 0.0),
             "bar_time": latest["timestamp"],
             "timestamp": now_naive(),
         }
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _closed_bars_only(df: pd.DataFrame):
+        """
+        Drop the forming bar. Returns (frame, reason) - a non-empty reason
+        means there is nothing scannable this cycle and says why, so the scan
+        log can tell "no closed bar yet" apart from "broker is late".
+
+        Outside market hours every stored bar is closed, so a forced scan on
+        a weekend still has a frame to work with.
+        """
+        if df is None or df.empty:
+            return df, "No candles"
+        if not MarketClock.is_market_open():
+            return df, None
+
+        bar_start = _floor_to_bar(now_naive(), cfg.BAR_MINUTES)
+        stamps = pd.to_datetime(df["timestamp"])
+        closed = df[stamps < bar_start]
+        if closed.empty:
+            return closed, "No closed candle yet this session"
+
+        last = pd.Timestamp(closed["timestamp"].iloc[-1])
+        expected = bar_start - timedelta(minutes=cfg.BAR_MINUTES)
+        if last < expected:
+            return closed, (f"Last closed bar is {last:%H:%M}, expected {expected:%H:%M} - "
+                            f"broker has not published it yet")
+        return closed.reset_index(drop=True), None
+
+    async def _live_entry(self, symbol: str, fallback: float) -> float:
+        """Live futures price for the entry; the closed bar's close if the quote fails."""
+        try:
+            quote = await self.feed.get_live_quote(symbol, use_futures=True)
+            ltp = float(quote.get("ltp") or 0)
+            if ltp > 0 and not quote.get("stale"):
+                return ltp
+            logger.warning("[Scanner] %s live quote unusable (ltp=%s, stale=%s) - "
+                           "entering at the bar close", symbol, ltp, quote.get("stale"))
+        except Exception as exc:
+            logger.warning("[Scanner] %s live quote failed (%s) - entering at the bar close",
+                           symbol, exc)
+        return fallback
 
     # ------------------------------------------------------------------ #
     async def _higher_timeframe(self, symbol: str, ltf: pd.DataFrame) -> Optional[pd.DataFrame]:
