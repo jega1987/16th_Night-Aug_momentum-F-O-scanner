@@ -580,6 +580,12 @@ class KiteFeed(MarketFeed):
             return False
 
         minutes = 5 if cfg.TIMEFRAME == "5m" else 15
+        if self.stream is not None:
+            # A previous ticker exists but is not connected. Close it properly
+            # before replacing it, and say so - a restart every minute is the
+            # signature of a socket that never opens.
+            logger.warning("[WS] Restarting stream (previous: %s)", self.stream.status())
+            self.stream.stop()
         self.stream = KiteTickStream(cfg.KITE_API_KEY, self.kite.access_token,
                                      token_map, minutes=minutes)
         self.stream.start()
@@ -655,8 +661,30 @@ class KiteTickStream:
         self.ticker.on_close = self._on_close
         self.ticker.on_error = self._on_error
 
+    # ------------------------------------------------------------------ #
+    # Twisted's reactor is one global object per process and, once running,
+    # only accepts work from its own thread. The FIRST stream of the process
+    # starts the reactor; every later one - after the close-of-day stop, or
+    # after the 08:00 token refresh - is created from the asyncio thread, and
+    # a plain ticker.connect() from there schedules nothing the reactor will
+    # ever notice. The socket silently never opens, job_manage_stream builds
+    # a fresh ticker every minute, and the scanner falls back to REST for the
+    # whole session. That is what left every symbol on Friday's candles all
+    # Monday morning. Hand reactor work to the reactor thread.
+    @staticmethod
+    def _on_reactor(fn, *args, **kwargs) -> None:
+        try:
+            from twisted.internet import reactor
+        except ImportError:
+            fn(*args, **kwargs)
+            return
+        if reactor.running:
+            reactor.callFromThread(fn, *args, **kwargs)
+        else:
+            fn(*args, **kwargs)          # first stream: this call starts the reactor
+
     def start(self) -> None:
-        self.ticker.connect(threaded=True)
+        self._on_reactor(self.ticker.connect, threaded=True)
 
     def _on_connect(self, ws, response):
         tokens = list(self.token_map.values())
@@ -710,7 +738,7 @@ class KiteTickStream:
         if not tokens:
             return False
         try:
-            self.ticker.unsubscribe(tokens)
+            self._on_reactor(self.ticker.unsubscribe, tokens)
             self.subscribed = False
             logger.info("[WS] Unsubscribed from %d token(s)", len(tokens))
             return True
@@ -720,7 +748,7 @@ class KiteTickStream:
 
     def stop(self) -> None:
         try:
-            self.ticker.close()
+            self._on_reactor(self.ticker.close)
         except Exception:
             pass
         self.connected = False
