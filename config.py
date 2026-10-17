@@ -322,6 +322,14 @@ class StrategyConfig:
     PORT: int = _int("PORT", 8000)
     # Set false on the web service when a separate worker owns the jobs.
     RUN_SCHEDULER: bool = _bool("RUN_SCHEDULER", True)
+    # Worker only. When true, the worker exits on its own at WORKER_STOP_TIME
+    # (IST), and exits immediately if started on a weekend, a MARKET_HOLIDAYS
+    # date, or after the stop time. Pair it with a Railway cron schedule that
+    # starts the worker each weekday morning, so the service holds memory only
+    # during market hours. Off by default: without a cron schedule to start it
+    # again, an exiting worker would simply stay down.
+    WORKER_AUTO_STOP: bool = _bool("WORKER_AUTO_STOP", False)
+    WORKER_STOP_TIME: str = os.getenv("WORKER_STOP_TIME", "18:00")
     DASHBOARD_TOKEN: str = os.getenv("DASHBOARD_TOKEN", "")             # blank = no auth
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
