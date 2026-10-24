@@ -83,6 +83,18 @@ class IndexScanner:
         if self.budget:
             setups = self.budget.take(setups)
 
+        # Positions open across days, capped as a whole.
+        if cfg.MAX_OPEN_POSITIONS > 0 and setups:
+            with session_scope() as db:
+                open_now = (db.query(Signal)
+                              .filter(Signal.status.in_(["OPEN", "RUNNING"])).count())
+            room = max(0, cfg.MAX_OPEN_POSITIONS - open_now)
+            if len(setups) > room:
+                ranked = sorted(setups, key=lambda x: -x.get("composite_score", 0.0))
+                logger.info("[Scanner] %d open position(s), cap %d - keeping %d of %d setup(s)",
+                            open_now, cfg.MAX_OPEN_POSITIONS, room, len(setups))
+                setups = ranked[:room]
+
         created = []
         for setup in setups:
             try:
@@ -177,6 +189,16 @@ class IndexScanner:
             except Exception:
                 atr_htf = None
 
+        # Positional: hourly ATR for an overnight-sized stop.
+        atr_pos = None
+        if cfg.is_positional and self.store:
+            try:
+                hourly = self.store.resample(df, cfg.POS_SL_ATR_TIMEFRAME)
+                if len(hourly) >= cfg.ATR_LENGTH + 2:
+                    atr_pos = round(float(atr(hourly, cfg.ATR_LENGTH).iloc[-1]), 2)
+            except Exception as exc:
+                logger.debug("[Scanner] %s hourly ATR unavailable: %s", symbol, exc)
+
         # Entry is the live price, because the bar we just scored is closed.
         bar_close = float(latest["close"])
         entry = bar_close
@@ -212,6 +234,7 @@ class IndexScanner:
             "bar_close": round(bar_close, 2),
             "atr": round(atr_val, 2),
             "atr_htf": atr_htf,
+            "atr_pos": atr_pos,
             "squeeze_high": result.meta.get("squeeze_high"),
             "squeeze_low": result.meta.get("squeeze_low"),
             "bar_high": result.meta.get("bar_high"),

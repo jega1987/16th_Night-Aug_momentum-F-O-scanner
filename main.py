@@ -104,6 +104,8 @@ async def job_snapshots():
 async def job_square_off():
     if not state.feed_connected or not MarketClock.is_market_day():
         return
+    if cfg.is_positional:
+        return      # positions carry overnight; time exits run in the position manager
     closed = await engine.force_square_off(feed, reason="15:20 square-off")
     if closed:
         await notifier.send(f"Squared off {len(closed)} position(s) at the bell.")
