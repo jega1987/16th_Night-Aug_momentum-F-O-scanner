@@ -29,11 +29,22 @@ class FilterEngine:
 
     # ------------------------------------------------------------------ #
     def apply_all(self, df: pd.DataFrame, htf: pd.DataFrame = None,
-                  oi: Optional[Dict] = None, symbol: str = None) -> FilterResult:
+                  oi: Optional[Dict] = None, symbol: str = None,
+                  sqz_df: pd.DataFrame = None,
+                  vol_baseline: Optional[float] = None) -> FilterResult:
         """
         `symbol` selects the index or equity threshold set. Stocks gap harder,
         trend more cleanly and reverse faster than indices, so they get their
         own volume, ADX and composite bars rather than inheriting index tuning.
+
+        `sqz_df` switches on the hybrid mode (SQUEEZE_TIMEFRAME=15m): the
+        squeeze and its high/low come from these COMPLETED higher-timeframe
+        bars, while the breakout close, volume, ADX and RSI are still judged on
+        the 5-minute frame `df`. Without it, everything runs on `df` as before.
+
+        `vol_baseline`, when given, replaces the rolling volume average - used
+        in the opening minutes, where the last 20 bars are yesterday's quiet
+        afternoon and any opening bar would look like a surge.
         """
         cfg = self.cfg
         res = FilterResult()
@@ -48,13 +59,23 @@ class FilterEngine:
             return res
 
         latest = df.iloc[-1]
+        hybrid = sqz_df is not None
+        if hybrid and len(sqz_df) < max(cfg.BB_LENGTH, cfg.KC_LENGTH) + cfg.MIN_SQUEEZE_BARS:
+            res.reason = f"Not enough {cfg.SQUEEZE_TIMEFRAME} candles for the squeeze ({len(sqz_df)})"
+            return res
+        base = sqz_df if hybrid else df
         in_sqz, sqz_dur, fired = detect_squeeze(
-            df, cfg.BB_LENGTH, cfg.BB_MULT, cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS
+            base, cfg.BB_LENGTH, cfg.BB_MULT, cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS
         )
         since_fire = bars_since(fired)
-        hi, lo = squeeze_range(df, in_sqz, sqz_dur, cfg.SQUEEZE_RANGE_MAX_BARS)
+        hi, lo = squeeze_range(base, in_sqz, sqz_dur, cfg.SQUEEZE_RANGE_MAX_BARS)
+        # Hybrid: a coil that is still on counts once it is old enough - the
+        # 5-minute close breaking its range IS the release, often a bar or two
+        # before the 15-minute bands confirm it.
+        live_coil = bool(hybrid and in_sqz.iloc[-1] and int(sqz_dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS)
 
         res.meta.update({
+            "squeeze_tf": cfg.SQUEEZE_TIMEFRAME if hybrid else cfg.TIMEFRAME,
             "in_squeeze": bool(in_sqz.iloc[-1]),
             "squeeze_bars": int(sqz_dur.iloc[-1]),
             "bars_since_fire": int(min(since_fire, 9999)),
@@ -69,20 +90,27 @@ class FilterEngine:
             res.meta["bar_time"] = str(latest["timestamp"])
 
         # 1. Squeeze must have actually released recently ------------------
-        res.scores["squeeze"] = 1.0 if since_fire <= cfg.MAX_BARS_SINCE_FIRE else 0.0
+        fresh = since_fire <= cfg.MAX_BARS_SINCE_FIRE or live_coil
+        res.scores["squeeze"] = 1.0 if fresh else 0.0
         if res.scores["squeeze"] < 1.0 and "squeeze" in cfg.HARD_FAIL_FACTORS:
-            res.reason = ("Still compressing" if in_sqz.iloc[-1]
-                          else f"No squeeze release in last {cfg.MAX_BARS_SINCE_FIRE} bars")
+            if in_sqz.iloc[-1]:
+                res.reason = (f"Still compressing ({int(sqz_dur.iloc[-1])}/{cfg.MIN_SQUEEZE_BARS} "
+                              f"{cfg.SQUEEZE_TIMEFRAME} bars)" if hybrid else "Still compressing")
+            else:
+                res.reason = f"No squeeze release in last {cfg.MAX_BARS_SINCE_FIRE} bars"
             return res
 
         # 1b. ...and the coil has to belong to this session. A squeeze that
         # started yesterday afternoon and "released" on today's opening bar is
         # an overnight gap wearing a Bollinger band, not a compression.
-        if cfg.REQUIRE_INTRADAY_SQUEEZE and "timestamp" in df.columns:
-            started = squeeze_start_timestamp(df, in_sqz, sqz_dur)
-            last_ts = pd.Timestamp(latest["timestamp"])
+        started = None
+        if "timestamp" in df.columns and "timestamp" in base.columns:
+            started = squeeze_start_timestamp(base, in_sqz, sqz_dur)
             if started is not None:
                 res.meta["squeeze_start"] = started.strftime("%d-%m %H:%M")
+        if cfg.REQUIRE_INTRADAY_SQUEEZE and "timestamp" in df.columns:
+            last_ts = pd.Timestamp(latest["timestamp"])
+            if started is not None:
                 if started.date() != last_ts.date():
                     res.scores["squeeze"] = 0.0
                     res.reason = f"Squeeze spans the previous session (began {started:%d-%m %H:%M})"
@@ -102,10 +130,23 @@ class FilterEngine:
             return res
         direction = res.direction
 
+        # 2b. Gap filter. When the coil began on an earlier day, today's open
+        # may already sit beyond the range - the "breakout" happened overnight
+        # and this bar is just confirming a gap (the TECHM 16-Oct case).
+        if cfg.GAP_FILTER and started is not None and "timestamp" in df.columns:
+            gap_reason = self._gap_reason(df, base, direction, hi, lo, started)
+            if gap_reason:
+                res.scores["gap"] = 0.0
+                res.reason = gap_reason
+                return res
+
         # 3. Volume expansion (MA excludes the breakout bar itself) --------
         vol_len = cfg.VOLUME_MA_LEN
         vol_hist = df["volume"].iloc[-(vol_len + 1):-1]
         vol_avg = float(vol_hist.mean()) if len(vol_hist) else 0.0
+        if vol_baseline and vol_baseline > 0:
+            vol_avg = float(vol_baseline)
+            res.meta["vol_basis"] = "same-slot"
         cur_vol = float(latest["volume"])
         if vol_avg <= 0:
             # Cash indices publish no volume. Don't fake a pass - score neutral
@@ -135,6 +176,15 @@ class FilterEngine:
             rsi_val = 50.0
             res.scores["rsi"] = 1.0
         res.meta["rsi_value"] = round(rsi_val, 2)
+        # 5b. Exhaustion cap: a short into RSI 21 or a long into RSI 80 is
+        # usually entering the end of the move (ICICIGI, 12-Oct: -1R).
+        if cfg.RSI_EXHAUSTION_FILTER and cfg.USE_RSI_FILTER:
+            if direction == "LONG" and rsi_val > cfg.RSI_LONG_MAX:
+                res.reason = f"RSI {rsi_val:.1f} above {cfg.RSI_LONG_MAX:.0f} - move already stretched"
+                return res
+            if direction == "SHORT" and rsi_val < cfg.RSI_SHORT_MIN:
+                res.reason = f"RSI {rsi_val:.1f} below {cfg.RSI_SHORT_MIN:.0f} - move already stretched"
+                return res
 
         # 6. Liquidity sweep -------------------------------------------------
         res.scores["sweep"] = 1.0 if self._check_sweep(df, direction) else 0.0
@@ -231,6 +281,36 @@ class FilterEngine:
         if len(idx) == 0:
             return False
         return close < float(df.loc[idx[-1], "low"])
+
+    def _gap_reason(self, df: pd.DataFrame, base: pd.DataFrame, direction: str,
+                    hi: float, lo: float, started) -> Optional[str]:
+        """
+        Reject when the squeeze began before today and today's first bar
+        opened more than GAP_MAX_ATR x ATR beyond the range in the trade's
+        direction. Measured with the squeeze timeframe's ATR.
+        """
+        stamps = pd.to_datetime(df["timestamp"])
+        today = stamps.iloc[-1].normalize()
+        if pd.Timestamp(started).normalize() >= today:
+            return None                      # coil built today - no gap question
+        todays = df[stamps >= today]
+        if todays.empty:
+            return None
+        day_open = float(todays["open"].iloc[0])
+        try:
+            atr_val = float(atr(base, self.cfg.ATR_LENGTH).iloc[-1])
+        except Exception:
+            return None
+        if atr_val <= 0:
+            return None
+        limit = self.cfg.GAP_MAX_ATR * atr_val
+        if direction == "LONG" and day_open > hi + limit:
+            return (f"Gap-up open {day_open:.2f} already {day_open - hi:.2f} above the "
+                    f"squeeze high {hi:.2f} - breakout happened overnight")
+        if direction == "SHORT" and day_open < lo - limit:
+            return (f"Gap-down open {day_open:.2f} already {lo - day_open:.2f} below the "
+                    f"squeeze low {lo:.2f} - breakout happened overnight")
+        return None
 
     def _score_oi(self, oi: Optional[Dict], direction: str) -> float:
         """

@@ -162,6 +162,33 @@ class StrategyConfig:
     # The coil must start and end in today's session. Bollinger and Keltner
     # measured across yesterday's close and today's open describe nothing.
     REQUIRE_INTRADAY_SQUEEZE: bool = _bool("REQUIRE_INTRADAY_SQUEEZE", True)
+
+    # ---------- hybrid squeeze (detect on 15m, enter on 5m) ----------
+    # "5m": squeeze detected on the scan timeframe, as before.
+    # "15m": squeeze and its high/low come from completed 15-minute bars; the
+    #        scan still runs every 5 minutes and fires when a closed 5-minute
+    #        bar closes outside that 15-minute range and passes the other checks.
+    #        MIN_SQUEEZE_BARS and MAX_BARS_SINCE_FIRE then count 15-minute bars.
+    SQUEEZE_TIMEFRAME: str = os.getenv("SQUEEZE_TIMEFRAME", "5m").strip().lower()
+    # 5-minute bars loaded per symbol in hybrid mode (~6 sessions), so a
+    # multi-day 15-minute coil plus BB/KC warm-up fits.
+    SQUEEZE_HISTORY_BARS: int = _int("SQUEEZE_HISTORY_BARS", 450)
+    # Gap filter, for coils that began on an earlier day: reject when today's
+    # open is already more than GAP_MAX_ATR x ATR (squeeze timeframe) beyond
+    # the range in the trade's direction.
+    GAP_FILTER: bool = _bool("GAP_FILTER", True)
+    GAP_MAX_ATR: float = _float("GAP_MAX_ATR", 0.5)
+    # Opening volume baseline: until OPEN_BASELINE_UNTIL, compare a bar's
+    # volume with the same 5-minute slot averaged over the last
+    # OPEN_BASELINE_DAYS sessions, not with yesterday's quiet afternoon.
+    OPEN_VOLUME_BASELINE: bool = _bool("OPEN_VOLUME_BASELINE", False)
+    OPEN_BASELINE_UNTIL: str = os.getenv("OPEN_BASELINE_UNTIL", "09:45")
+    OPEN_BASELINE_DAYS: int = _int("OPEN_BASELINE_DAYS", 10)
+    OPEN_BASELINE_MIN_DAYS: int = _int("OPEN_BASELINE_MIN_DAYS", 5)
+    # RSI exhaustion cap: no LONG above RSI_LONG_MAX, no SHORT below RSI_SHORT_MIN.
+    RSI_EXHAUSTION_FILTER: bool = _bool("RSI_EXHAUSTION_FILTER", False)
+    RSI_LONG_MAX: float = _float("RSI_LONG_MAX", 75.0)
+    RSI_SHORT_MIN: float = _float("RSI_SHORT_MIN", 25.0)
     # With closed-bar scanning the entry is the live price, not the bar close.
     # If price has already run more than this many ATRs past the closed bar's
     # close, the breakout is being chased and the setup is skipped.
@@ -361,6 +388,8 @@ class StrategyConfig:
         if self.TIMEFRAME not in ("5m", "15m"):
             self.TIMEFRAME = "5m"
         self.BAR_MINUTES = 5 if self.TIMEFRAME == "5m" else 15
+        if self.SQUEEZE_TIMEFRAME not in ("5m", "15m"):
+            self.SQUEEZE_TIMEFRAME = "5m"
         if self.TARGET_MODE not in ("risk", "atr"):
             self.TARGET_MODE = "risk"
         if self.SIZING_MODE not in ("notional", "risk"):
