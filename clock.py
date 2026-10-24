@@ -92,6 +92,18 @@ class MarketClock:
         return "LIVE"
 
     @classmethod
+    def trading_days_between(cls, start, end) -> int:
+        """Trading days after `start` up to and including `end` (dates)."""
+        if end <= start:
+            return 0
+        days, d = 0, start
+        while d < end:
+            d = d + timedelta(days=1)
+            if cls.is_market_day(datetime.combine(d, time(12, 0))):
+                days += 1
+        return days
+
+    @classmethod
     def bars_between(cls, start: datetime, end: datetime, bar_minutes: int) -> int:
         """Rough bar count between two timestamps, used for signal cooldowns."""
         if not start or not end:

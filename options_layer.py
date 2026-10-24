@@ -281,6 +281,11 @@ class OptionsLayer:
         if not live:
             return None
 
+        if cfg.is_positional and cfg.OPTION_MIN_DTE > 0:
+            # Held for days: skip contracts that would be in fast decay.
+            far_enough = [e for e in live if (e["date"] - today).days >= cfg.OPTION_MIN_DTE]
+            return dict(far_enough[0]) if far_enough else dict(live[-1])
+
         nearest = live[0]
         if nearest["date"] == today and cfg.EXPIRY_DAY_ROLLOVER and self._past_theta_cutoff():
             if len(live) > 1:

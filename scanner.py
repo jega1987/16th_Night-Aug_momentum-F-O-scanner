@@ -83,6 +83,18 @@ class IndexScanner:
         if self.budget:
             setups = self.budget.take(setups)
 
+        # Positions open across days, capped as a whole.
+        if cfg.MAX_OPEN_POSITIONS > 0 and setups:
+            with session_scope() as db:
+                open_now = (db.query(Signal)
+                              .filter(Signal.status.in_(["OPEN", "RUNNING"])).count())
+            room = max(0, cfg.MAX_OPEN_POSITIONS - open_now)
+            if len(setups) > room:
+                ranked = sorted(setups, key=lambda x: -x.get("composite_score", 0.0))
+                logger.info("[Scanner] %d open position(s), cap %d - keeping %d of %d setup(s)",
+                            open_now, cfg.MAX_OPEN_POSITIONS, room, len(setups))
+                setups = ranked[:room]
+
         created = []
         for setup in setups:
             try:
@@ -99,10 +111,12 @@ class IndexScanner:
     # ------------------------------------------------------------------ #
     async def _scan_symbol(self, symbol: str, timeframe: str) -> Optional[Dict]:
         # ---- stage 1: candles only. Cheap, and it decides everything else. ----
+        hybrid = self._hybrid(timeframe)
+        bars = max(cfg.HISTORY_BARS, cfg.SQUEEZE_HISTORY_BARS) if hybrid else cfg.HISTORY_BARS
         if self.store and cfg.USE_CANDLE_STORE:
-            df = await self.store.get(symbol, timeframe, cfg.HISTORY_BARS, use_futures=True)
+            df = await self.store.get(symbol, timeframe, bars, use_futures=True)
         else:
-            df = await self.feed.get_historical(symbol, timeframe, cfg.HISTORY_BARS, use_futures=True)
+            df = await self.feed.get_historical(symbol, timeframe, bars, use_futures=True)
 
         # Only closed candles are scored. The last row from Kite (and from the
         # websocket builder) is the bar still forming; judged 20 seconds in,
@@ -117,6 +131,11 @@ class IndexScanner:
         if cfg.HTF_ALIGNMENT:
             htf = await self._higher_timeframe(symbol, df)
 
+        # Hybrid mode: the squeeze is judged on COMPLETED 15-minute bars built
+        # from the 5-minute frame. The 15-minute bar still forming is dropped -
+        # its bands would move under us between the three 5-minute scans.
+        sqz_df = self._completed_squeeze_bars(df) if hybrid else None
+
         latest = df.iloc[-1]
 
         # ---- stage 2: only pay for open interest if the setup is still alive ----
@@ -124,7 +143,8 @@ class IndexScanner:
         # for ~98% of symbol-scans. At 200 symbols that is the difference between
         # a workable budget and a rate-limit wall.
         oi = None
-        if cfg.USE_OI_FILTER and self._worth_a_second_look(df):
+        alive = self._worth_a_second_look(sqz_df if hybrid else df, hybrid)
+        if cfg.USE_OI_FILTER and alive:
             # Kite returns open interest inside the candles, so the change is a
             # real bar-over-bar figure rather than the difference between two
             # polled snapshots taken at arbitrary moments. Fall back to polling
@@ -133,7 +153,12 @@ class IndexScanner:
             if oi is None:
                 oi = await self._oi_change(symbol, float(latest["close"]))
 
-        result = self.filters.apply_all(df, htf=htf, oi=oi, symbol=symbol)
+        vol_baseline = None
+        if cfg.OPEN_VOLUME_BASELINE and alive:
+            vol_baseline = self._opening_volume_baseline(symbol, timeframe, latest["timestamp"])
+
+        result = self.filters.apply_all(df, htf=htf, oi=oi, symbol=symbol,
+                                        sqz_df=sqz_df, vol_baseline=vol_baseline)
 
         self._log_scan(symbol, timeframe, result.meta,
                        passed=result.passed,
@@ -163,6 +188,16 @@ class IndexScanner:
                 atr_htf = round(float(atr(htf, cfg.ATR_LENGTH).iloc[-1]), 2)
             except Exception:
                 atr_htf = None
+
+        # Positional: hourly ATR for an overnight-sized stop.
+        atr_pos = None
+        if cfg.is_positional and self.store:
+            try:
+                hourly = self.store.resample(df, cfg.POS_SL_ATR_TIMEFRAME)
+                if len(hourly) >= cfg.ATR_LENGTH + 2:
+                    atr_pos = round(float(atr(hourly, cfg.ATR_LENGTH).iloc[-1]), 2)
+            except Exception as exc:
+                logger.debug("[Scanner] %s hourly ATR unavailable: %s", symbol, exc)
 
         # Entry is the live price, because the bar we just scored is closed.
         bar_close = float(latest["close"])
@@ -199,6 +234,7 @@ class IndexScanner:
             "bar_close": round(bar_close, 2),
             "atr": round(atr_val, 2),
             "atr_htf": atr_htf,
+            "atr_pos": atr_pos,
             "squeeze_high": result.meta.get("squeeze_high"),
             "squeeze_low": result.meta.get("squeeze_low"),
             "bar_high": result.meta.get("bar_high"),
@@ -281,11 +317,66 @@ class IndexScanner:
             return None
 
     @staticmethod
-    def _worth_a_second_look(df: pd.DataFrame) -> bool:
-        """Stage-1 triage: has a squeeze released recently enough to matter?"""
+    def _hybrid(timeframe: str) -> bool:
+        """15-minute squeeze with 5-minute entries."""
+        return cfg.SQUEEZE_TIMEFRAME == "15m" and timeframe == "5m"
+
+    def _completed_squeeze_bars(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """
+        15-minute bars resampled from closed 5-minute bars, keeping only
+        buckets that are complete. Only the last bucket can be partial: it is
+        complete once the 5-minute bar starting 10 minutes into it exists.
+        """
+        if df is None or df.empty or not self.store:
+            return None
+        sq = self.store.resample(df, cfg.SQUEEZE_TIMEFRAME)
+        if sq.empty:
+            return sq
+        last_5m = pd.Timestamp(df["timestamp"].iloc[-1])
+        last_bucket = pd.Timestamp(sq["timestamp"].iloc[-1])
+        if last_bucket + timedelta(minutes=15) > last_5m + timedelta(minutes=5):
+            sq = sq.iloc[:-1]
+        return sq.reset_index(drop=True)
+
+    def _opening_volume_baseline(self, symbol: str, timeframe: str, bar_ts) -> Optional[float]:
+        """
+        Average volume of this same 5-minute slot over the previous
+        OPEN_BASELINE_DAYS sessions, read from stored candles (no Kite call).
+        None outside the opening window or with too little history, in which
+        case the normal rolling average is used.
+        """
+        if not self.store:
+            return None
+        ts = pd.Timestamp(bar_ts)
+        hh, mm = (int(x) for x in cfg.OPEN_BASELINE_UNTIL.split(":")[:2])
+        if (ts.hour, ts.minute) >= (hh, mm):
+            return None
         try:
-            _, _, fired = detect_squeeze(df, cfg.BB_LENGTH, cfg.BB_MULT,
-                                         cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS)
+            hist = self.store.read(symbol, timeframe, 75 * (cfg.OPEN_BASELINE_DAYS + 2))
+        except Exception as exc:
+            logger.debug("[Scanner] %s opening baseline unavailable: %s", symbol, exc)
+            return None
+        if hist is None or hist.empty:
+            return None
+        stamps = pd.to_datetime(hist["timestamp"])
+        same_slot = hist[(stamps.dt.hour == ts.hour) & (stamps.dt.minute == ts.minute)
+                         & (stamps.dt.normalize() < ts.normalize())]
+        vols = pd.to_numeric(same_slot["volume"], errors="coerce").dropna()
+        vols = vols[vols > 0].tail(cfg.OPEN_BASELINE_DAYS)
+        if len(vols) < cfg.OPEN_BASELINE_MIN_DAYS:
+            return None
+        return float(vols.mean())
+
+    @staticmethod
+    def _worth_a_second_look(df: pd.DataFrame, hybrid: bool = False) -> bool:
+        """Stage-1 triage: has a squeeze released recently enough to matter?"""
+        if df is None or df.empty:
+            return False
+        try:
+            in_sqz, dur, fired = detect_squeeze(df, cfg.BB_LENGTH, cfg.BB_MULT,
+                                                cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS)
+            if hybrid and bool(in_sqz.iloc[-1]) and int(dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS:
+                return True
             return bars_since(fired) <= cfg.MAX_BARS_SINCE_FIRE
         except Exception:
             return True   # when in doubt, do the full check

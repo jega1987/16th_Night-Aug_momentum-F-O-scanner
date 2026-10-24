@@ -162,6 +162,59 @@ class StrategyConfig:
     # The coil must start and end in today's session. Bollinger and Keltner
     # measured across yesterday's close and today's open describe nothing.
     REQUIRE_INTRADAY_SQUEEZE: bool = _bool("REQUIRE_INTRADAY_SQUEEZE", True)
+
+    # ---------- hybrid squeeze (detect on 15m, enter on 5m) ----------
+    # "5m": squeeze detected on the scan timeframe, as before.
+    # "15m": squeeze and its high/low come from completed 15-minute bars; the
+    #        scan still runs every 5 minutes and fires when a closed 5-minute
+    #        bar closes outside that 15-minute range and passes the other checks.
+    #        MIN_SQUEEZE_BARS and MAX_BARS_SINCE_FIRE then count 15-minute bars.
+    SQUEEZE_TIMEFRAME: str = os.getenv("SQUEEZE_TIMEFRAME", "5m").strip().lower()
+    # 5-minute bars loaded per symbol in hybrid mode (~6 sessions), so a
+    # multi-day 15-minute coil plus BB/KC warm-up fits.
+    SQUEEZE_HISTORY_BARS: int = _int("SQUEEZE_HISTORY_BARS", 450)
+    # Gap filter, for coils that began on an earlier day: reject when today's
+    # open is already more than GAP_MAX_ATR x ATR (squeeze timeframe) beyond
+    # the range in the trade's direction.
+    GAP_FILTER: bool = _bool("GAP_FILTER", True)
+    GAP_MAX_ATR: float = _float("GAP_MAX_ATR", 0.5)
+    # Opening volume baseline: until OPEN_BASELINE_UNTIL, compare a bar's
+    # volume with the same 5-minute slot averaged over the last
+    # OPEN_BASELINE_DAYS sessions, not with yesterday's quiet afternoon.
+    OPEN_VOLUME_BASELINE: bool = _bool("OPEN_VOLUME_BASELINE", False)
+    OPEN_BASELINE_UNTIL: str = os.getenv("OPEN_BASELINE_UNTIL", "09:45")
+    OPEN_BASELINE_DAYS: int = _int("OPEN_BASELINE_DAYS", 10)
+    OPEN_BASELINE_MIN_DAYS: int = _int("OPEN_BASELINE_MIN_DAYS", 5)
+    # RSI exhaustion cap: no LONG above RSI_LONG_MAX, no SHORT below RSI_SHORT_MIN.
+    RSI_EXHAUSTION_FILTER: bool = _bool("RSI_EXHAUSTION_FILTER", False)
+    RSI_LONG_MAX: float = _float("RSI_LONG_MAX", 75.0)
+    RSI_SHORT_MIN: float = _float("RSI_SHORT_MIN", 25.0)
+
+    # ---------- trading mode ----------
+    # "intraday":   everything is squared off at 15:20 (the original design).
+    # "positional": positions carry overnight. They close on SL / targets /
+    #               trailing stop as usual, or at POS_EXIT_TIME once they have
+    #               been held POS_MAX_HOLD_DAYS trading days after the entry
+    #               day, or on the day before the option's expiry.
+    TRADING_MODE: str = os.getenv("TRADING_MODE", "intraday").strip().lower()
+    POS_MAX_HOLD_DAYS: int = _int("POS_MAX_HOLD_DAYS", 3)
+    POS_EXIT_TIME: str = os.getenv("POS_EXIT_TIME", "15:20")
+    POS_EXIT_DAYS_BEFORE_EXPIRY: int = _int("POS_EXIT_DAYS_BEFORE_EXPIRY", 1)
+    # Overnight-sized stop: one more candidate in the stop placement,
+    # POS_SL_ATR_MULT x ATR on POS_SL_ATR_TIMEFRAME bars (widest still wins).
+    POS_SL_ATR_TIMEFRAME: str = os.getenv("POS_SL_ATR_TIMEFRAME", "60m")
+    POS_SL_ATR_MULT: float = _float("POS_SL_ATR_MULT", 1.5)
+    # Supertrend trailing stop is computed on this timeframe in positional mode.
+    POS_TRAIL_TIMEFRAME: str = os.getenv("POS_TRAIL_TIMEFRAME", "15m")
+    # Option expiry: in positional mode pick the nearest expiry at least this
+    # many days away, so the option is not decaying fast while held.
+    OPTION_MIN_DTE: int = _int("OPTION_MIN_DTE", 7)
+    # Cap on positions open at the same time, across days. 0 = no cap.
+    MAX_OPEN_POSITIONS: int = _int("MAX_OPEN_POSITIONS", 0)
+
+    @property
+    def is_positional(self) -> bool:
+        return self.TRADING_MODE == "positional"
     # With closed-bar scanning the entry is the live price, not the bar close.
     # If price has already run more than this many ATRs past the closed bar's
     # close, the breakout is being chased and the setup is skipped.
@@ -361,6 +414,8 @@ class StrategyConfig:
         if self.TIMEFRAME not in ("5m", "15m"):
             self.TIMEFRAME = "5m"
         self.BAR_MINUTES = 5 if self.TIMEFRAME == "5m" else 15
+        if self.SQUEEZE_TIMEFRAME not in ("5m", "15m"):
+            self.SQUEEZE_TIMEFRAME = "5m"
         if self.TARGET_MODE not in ("risk", "atr"):
             self.TARGET_MODE = "risk"
         if self.SIZING_MODE not in ("notional", "risk"):

@@ -12,9 +12,12 @@ Lifecycle
 """
 import logging
 import math
+from datetime import time, timedelta
 from typing import Dict, List, Optional
 
-from clock import MarketClock, now_naive, today_start
+import pandas as pd
+
+from clock import MarketClock, _parse_time, now_naive, today_start
 from config import cfg
 from database import Signal, session_scope
 from indicators import atm_strike, supertrend
@@ -102,6 +105,12 @@ class SignalEngine:
         atr_htf = setup.get("atr_htf")
         if atr_htf:
             candidates["htf_atr"] = float(atr_htf) * cfg.SL_HTF_ATR_MULT
+
+        # Positional: the stop has to survive an overnight gap, so it is also
+        # at least POS_SL_ATR_MULT x the hourly ATR.
+        atr_pos = setup.get("atr_pos")
+        if cfg.is_positional and atr_pos:
+            candidates["pos_atr"] = float(atr_pos) * cfg.POS_SL_ATR_MULT
 
         candidates["min_pct"] = entry * cfg.min_sl_pct(symbol) / 100
 
@@ -269,7 +278,8 @@ class SignalEngine:
             try:
                 # Entries come from futures candles, so exits must price the same
                 # instrument or the P&L is measuring two different things.
-                df = await feed.get_historical(symbol, cfg.TIMEFRAME, max(60, cfg.ST_PERIOD * 5),
+                trail_tf = cfg.POS_TRAIL_TIMEFRAME if cfg.is_positional else cfg.TIMEFRAME
+                df = await feed.get_historical(symbol, trail_tf, max(60, cfg.ST_PERIOD * 5),
                                                use_futures=True)
                 prices[symbol] = float(df["close"].iloc[-1])
                 if cfg.USE_SUPERTREND_EXIT:
@@ -278,7 +288,7 @@ class SignalEngine:
             except Exception as exc:
                 logger.warning("[Engine] Cannot price %s this cycle: %s", symbol, exc)
 
-        square_off = MarketClock.should_square_off()
+        square_off = MarketClock.should_square_off() and not cfg.is_positional
         updates = []
         for snap in live:
             ltp = prices.get(snap["symbol"])
@@ -293,7 +303,11 @@ class SignalEngine:
                 logger.warning("[Engine] Signal %s (%s) missing %s - skipping management",
                                snap.get("id"), snap.get("symbol"), ", ".join(missing))
                 continue
-            changed = self._apply_rules(snap, ltp, trends.get(snap["symbol"]), square_off)
+            exit_reason = "Closed at the intraday square-off" if square_off else None
+            if cfg.is_positional:
+                exit_reason = self._positional_exit_reason(snap)
+            changed = self._apply_rules(snap, ltp, trends.get(snap["symbol"]),
+                                        exit_reason is not None, exit_reason)
             if changed:
                 updates.append(snap)
 
@@ -314,7 +328,38 @@ class SignalEngine:
         return updates
 
     # ------------------------------------------------------------------ #
-    def _apply_rules(self, s: Dict, ltp: float, trend, square_off: bool) -> bool:
+    @staticmethod
+    def _positional_exit_reason(s: Dict, now=None) -> Optional[str]:
+        """
+        Time-based exits for positional trades. Returns a reason when the
+        position must close now, else None.
+
+        - Held POS_MAX_HOLD_DAYS trading days after the entry day: close at
+          POS_EXIT_TIME on that day (e.g. entry Monday, 3 days -> Thursday).
+        - Option expiry: close at POS_EXIT_TIME, POS_EXIT_DAYS_BEFORE_EXPIRY
+          days before the contract's expiry.
+        A deadline that passed while the worker was down closes immediately.
+        """
+        now = now or now_naive()
+        exit_t = _parse_time(cfg.POS_EXIT_TIME, time(15, 20))
+        at_bell = now.time() >= exit_t
+
+        opened = s.get("timestamp")
+        if opened is not None:
+            held = MarketClock.trading_days_between(pd.Timestamp(opened).date(), now.date())
+            if held > cfg.POS_MAX_HOLD_DAYS or (held == cfg.POS_MAX_HOLD_DAYS and at_bell):
+                return f"Max holding period of {cfg.POS_MAX_HOLD_DAYS} trading days reached"
+
+        expiry = s.get("option_expiry")
+        if expiry:
+            exp = pd.Timestamp(expiry).date()
+            due = exp - timedelta(days=cfg.POS_EXIT_DAYS_BEFORE_EXPIRY)
+            if now.date() > due or (now.date() == due and at_bell):
+                return f"Closed before option expiry ({exp:%d-%b})"
+        return None
+
+    def _apply_rules(self, s: Dict, ltp: float, trend, square_off: bool,
+                     reason: Optional[str] = None) -> bool:
         long_side = s["direction"] == "LONG"
         sign = 1 if long_side else -1
         entry = s["entry"]
@@ -378,7 +423,7 @@ class SignalEngine:
             s["notes"] = "Supertrend flipped against the position"
         elif square_off:
             exit_price, status = ltp, "SQUAREOFF"
-            s["notes"] = "Closed at the intraday square-off"
+            s["notes"] = reason or "Closed at the intraday square-off"
 
         if exit_price is not None:
             remaining = s["qty_open"] if s["qty_open"] is not None else qty_total
