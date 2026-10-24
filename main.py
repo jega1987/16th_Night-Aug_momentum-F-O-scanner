@@ -18,7 +18,9 @@ import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from clock import IST, MarketClock, now_naive
+from datetime import time
+
+from clock import IST, MarketClock, _parse_time, now_naive
 from config import cfg
 from database import init_db
 from runtime import (budget, engine, feed, notifier, options, scanner,
@@ -392,6 +394,18 @@ async def run_worker() -> None:
     request can never slow a scan. Both processes are safe to run together -
     set RUN_SCHEDULER=false on the web service so jobs fire in exactly one.
     """
+    stop_at = _parse_time(cfg.WORKER_STOP_TIME, time(18, 0))
+    if cfg.WORKER_AUTO_STOP:
+        now = now_naive()
+        if not MarketClock.is_market_day(now):
+            logger.info("[Worker] %s is not a trading day (weekend or MARKET_HOLIDAYS) "
+                        "- exiting without starting", now.date())
+            return
+        if now.time() >= stop_at:
+            logger.info("[Worker] Started at %s, after WORKER_STOP_TIME %s - exiting",
+                        now.strftime("%H:%M"), stop_at.strftime("%H:%M"))
+            return
+
     state.started_at = now_naive()
     init_db()
     register_jobs()
@@ -430,6 +444,22 @@ async def run_worker() -> None:
 
     server = uvicorn.Server(uvicorn.Config(
         health_app, host="0.0.0.0", port=cfg.PORT, log_level="warning"))
+
+    if cfg.WORKER_AUTO_STOP:
+        # A clean exit (code 0) at the stop time. railway.json restarts only
+        # ON_FAILURE, so Railway leaves the worker down until the next cron run.
+        async def job_auto_stop():
+            logger.info("[Worker] WORKER_STOP_TIME %s reached - shutting down for the day",
+                        stop_at.strftime("%H:%M"))
+            if getattr(feed, "stop_stream", None):
+                feed.stop_stream()
+            server.should_exit = True
+
+        scheduler.add_job(job_auto_stop,
+                          CronTrigger(hour=stop_at.hour, minute=stop_at.minute, timezone=IST),
+                          id="auto_stop", replace_existing=True)
+        logger.info("[Worker] Auto-stop on - will exit at %s IST", stop_at.strftime("%H:%M"))
+
     try:
         await server.serve()
     except (KeyboardInterrupt, asyncio.CancelledError):
