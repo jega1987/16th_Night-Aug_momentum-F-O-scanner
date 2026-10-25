@@ -270,6 +270,35 @@ def universe_symbols(limit: int) -> List[str]:
     return out
 
 
+def start_health_server() -> None:
+    """
+    Answer Railway's /health check while the download runs. The shared
+    railway.json gives every service a health check; without a listener the
+    deployment would be marked failed and stopped part-way through.
+    """
+    import os
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    port = int(os.getenv("PORT", "0") or 0)
+    if not port:
+        return
+
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status": "ok", "role": "history-backfill"}')
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("0.0.0.0", port), Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("Health endpoint listening on :%d", port)
+
+
 async def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--days15", type=int, default=365)
@@ -280,6 +309,7 @@ async def main(argv=None) -> int:
     ap.add_argument("--no-vix", action="store_true")
     args = ap.parse_args(argv)
 
+    start_health_server()
     init_db()
     HistCandle.__table__.create(bind=engine, checkfirst=True)
 
