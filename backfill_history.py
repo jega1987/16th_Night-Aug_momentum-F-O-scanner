@@ -165,7 +165,11 @@ class Backfiller:
         if expected and have >= 0.9 * expected:
             return have, "already stored"
 
-        for futures, source in ((True, "fut_continuous"), (False, "spot")):
+        # Kite serves continuous futures for DAILY candles only ("invalid
+        # interval for continuous data" otherwise), and not for BSE (BFO).
+        attempts = (((True, "fut_continuous"), (False, "spot")) if timeframe == "1d"
+                    else ((False, "spot"),))
+        for futures, source in attempts:
             inst = self._instrument(symbol, futures)
             if not inst:
                 continue
@@ -195,6 +199,30 @@ class Backfiller:
                         HistCandle.source == source).delete(synchronize_session=False)
         return 0, "failed"
 
+    async def _pull_current_future(self, symbol: str, timeframe: str = "5m") -> Tuple[int, str]:
+        """
+        5-minute candles of the CURRENT futures contract, stored as
+        '<symbol>::FUT'. Expired contracts are not in the instruments dump, so
+        intraday OI (and index volume) only exists for this contract's life.
+        """
+        if symbol == VIX_SYMBOL:
+            return 0, "n/a"
+        inst = self._instrument(symbol, True)
+        if not inst:
+            return 0, "no future"
+        key = f"{symbol}::FUT"
+        end = now_naive()
+        start = end - timedelta(days=SPAN_DAYS[timeframe])
+        label = f"hist {key} {timeframe}"
+        try:
+            raw = await self._fetch(int(inst["instrument_token"]), start, end, timeframe,
+                                    False, label)
+        except Exception as exc:
+            logger.warning("%s -> %s", label, exc)
+            return 0, "failed"
+        n = _insert_rows(_to_rows(raw, key, timeframe, "fut_current"))
+        return n, "fut_current"
+
     async def run(self, symbols: List[str], days15: int, days5: int, daily: int) -> Dict:
         plan = [("15m", days15), ("5m", days5), ("1d", daily)]
         t0 = _time.time()
@@ -212,6 +240,9 @@ class Backfiller:
                 self.stats[symbol][timeframe] = {"rows": n, "source": source}
                 if n == 0:
                     self.failures.append(f"{symbol} {timeframe}: {source}")
+            if days5 > 0 and symbol != VIX_SYMBOL:
+                n, source = await self._pull_current_future(symbol)
+                self.stats[symbol]["5m_fut"] = {"rows": n, "source": source}
             if i % 10 == 0 or i == len(symbols):
                 logger.info("Progress %d/%d symbols | %d API calls | %.1f min",
                             i, len(symbols), self.calls, (_time.time() - t0) / 60)
