@@ -96,11 +96,13 @@ def list_symbols(engine) -> List[str]:
 class SymbolBacktest:
     """Signals and simulated trades for one symbol."""
 
-    def __init__(self, symbol: str, d5: pd.DataFrame, cfg, filters, store):
+    def __init__(self, symbol: str, d5: pd.DataFrame, cfg, filters, store,
+                 eval_cache: Optional[Dict] = None, q15: Optional[pd.DataFrame] = None):
         from clock import _parse_time
+        self.eval_cache = eval_cache if eval_cache is not None else {}
         self.symbol, self.cfg, self.filters, self.store = symbol, cfg, filters, store
         self.d5 = d5.reset_index(drop=True)
-        self.q15 = store.resample(self.d5, "15m")
+        self.q15 = q15 if q15 is not None else store.resample(self.d5, "15m")
         # A 15-minute bucket is complete at bucket start + 15 min.
         self.q15_done = (pd.to_datetime(self.q15["timestamp"]) + pd.Timedelta(minutes=15)).values
         self.bar_close = (pd.to_datetime(self.d5["timestamp"]) + pd.Timedelta(minutes=5)).values
@@ -172,7 +174,22 @@ class SymbolBacktest:
         return float(vols.mean()) if len(vols) >= cfg.OPEN_BASELINE_MIN_DAYS else None
 
     # ---------------- full evaluation of one candidate ---------------- #
+    def _filter_signature(self):
+        c = self.cfg
+        return (c.volume_mult(self.symbol), c.adx_threshold(self.symbol), c.min_composite(self.symbol),
+                c.RSI_EXHAUSTION_FILTER, c.GAP_FILTER, c.OPEN_VOLUME_BASELINE,
+                c.TRADING_MODE)
+
     def _evaluate(self, i: int) -> Optional[Dict]:
+        key = (i, self._filter_signature())
+        if key in self.eval_cache:
+            hit = self.eval_cache[key]
+            return dict(hit) if hit else None
+        out = self._evaluate_uncached(i)
+        self.eval_cache[key] = dict(out) if out else None
+        return out
+
+    def _evaluate_uncached(self, i: int) -> Optional[Dict]:
         from indicators import atr
         from signal_engine import SignalEngine
         cfg = self.cfg
@@ -287,7 +304,8 @@ class SymbolBacktest:
 
             # 3. at a 15-minute bar completion: trail / flip
             close_ts = pd.Timestamp(bar["timestamp"]) + pd.Timedelta(minutes=5)
-            if st_dir is not None:
+            trail_ok = not getattr(cfg, "BT_TRAIL_AFTER_TP1", False) or tp1_hit
+            if st_dir is not None and trail_ok:
                 j = self._jidx[k]
                 if j >= 0 and pd.Timestamp(self.q15_done[j]) == close_ts:
                     sd, sl_ = int(st_dir[j]), float(st_line[j])
@@ -296,9 +314,12 @@ class SymbolBacktest:
                         break
                     stop = max(stop, sl_) if long_side else min(stop, sl_)
 
-            # 4. time stop
+            # 4. time stop (and the experimental same-day exit)
             held = MarketClock.trading_days_between(entry_day, close_ts.date())
             at_bell = close_ts.time() >= self.exit_t
+            if getattr(cfg, "BT_EXIT_EOD", False) and at_bell:
+                exit_price, reason, k_exit = c, "eod square-off", k
+                break
             if held > cfg.POS_MAX_HOLD_DAYS or (held == cfg.POS_MAX_HOLD_DAYS and at_bell):
                 exit_price, reason, k_exit = c, "time stop", k
                 break
@@ -422,6 +443,32 @@ def save_trades(engine, trades: List[Dict], run_id: str, label: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Variant sets: (name, {config attribute: value}). Values are applied to the
+# loaded config for that variant only. BT_* flags exist only in the backtest.
+PRESETS = {
+    "base": [("live-rules", {})],
+    "oct25": [
+        ("live-rules", {}),
+        ("eod-exit", {"BT_EXIT_EOD": True}),
+        ("targets-1R-2R-3R", {"TARGET_R_MULTS": [1.0, 2.0, 3.0]}),
+        ("start-0945", {"SIGNAL_START_TIME": "09:45"}),
+        ("stock-volume-3x", {"EQ_VOLUME_MULT": 3.0}),
+        ("trail-after-tp1", {"BT_TRAIL_AFTER_TP1": True}),
+        ("combo-eod+1R+0945+trailTP1", {"BT_EXIT_EOD": True, "TARGET_R_MULTS": [1.0, 2.0, 3.0],
+                                         "SIGNAL_START_TIME": "09:45", "BT_TRAIL_AFTER_TP1": True}),
+    ],
+}
+
+
+def _set_cfg(cfg, changes: Dict) -> Dict:
+    """Apply attribute changes; returns the previous values for restoring."""
+    saved = {}
+    for k, v in changes.items():
+        saved[k] = getattr(cfg, k, None)
+        setattr(cfg, k, v)
+    return saved
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Backtest the live squeeze strategy")
     ap.add_argument("--days", type=int, default=180, help="5-minute history to replay")
@@ -429,6 +476,7 @@ def main(argv=None) -> int:
     ap.add_argument("--label", type=str, default="live-rules")
     ap.add_argument("--set", action="append", default=[], help="KEY=VALUE config override")
     ap.add_argument("--no-save", action="store_true")
+    ap.add_argument("--preset", type=str, default="base", help="variant set, e.g. oct25")
     args = ap.parse_args(argv)
 
     overrides = _apply_overrides(args.set)
@@ -449,22 +497,64 @@ def main(argv=None) -> int:
                 "| overrides=%s", args.label, len(symbols), args.days, cfg.TRADING_MODE,
                 cfg.SQUEEZE_TIMEFRAME, cfg.EQ_ADX_THRESHOLD, cfg.ADX_THRESHOLD, overrides)
 
+    variants = PRESETS.get(args.preset, PRESETS["base"])
+    if args.preset != "base":
+        logger.info("Preset '%s': %s", args.preset, ", ".join(v[0] for v in variants))
+
     t0 = _time.time()
-    all_trades, rejects = [], {}
+    per_variant: Dict[str, List[Dict]] = {v[0]: [] for v in variants}
+    rejects: Dict[str, int] = {}
     for n, sym in enumerate(symbols, 1):
         try:
             d5 = load_series(engine, sym, "5m", args.days)
             if len(d5) < 400:
                 continue
-            bt = SymbolBacktest(sym, d5, cfg, filters, store)
-            all_trades += bt.run()
-            for k, v in bt.rejects.items():
-                rejects[k] = rejects.get(k, 0) + v
+            cache: Dict = {}
+            q15 = store.resample(d5, "15m")
+            for name, changes in variants:
+                saved = _set_cfg(cfg, changes)
+                try:
+                    bt = SymbolBacktest(sym, d5, cfg, filters, store, cache, q15)
+                    per_variant[name] += bt.run()
+                    if name == variants[0][0]:
+                        for k, v in bt.rejects.items():
+                            rejects[k] = rejects.get(k, 0) + v
+                finally:
+                    _set_cfg(cfg, saved)
         except Exception as exc:
             logger.warning("%s failed: %s", sym, exc)
         if n % 20 == 0 or n == len(symbols):
-            logger.info("Progress %d/%d | %d raw trades | %.1f min", n, len(symbols),
-                        len(all_trades), (_time.time() - t0) / 60)
+            logger.info("Progress %d/%d | %s | %.1f min", n, len(symbols),
+                        {k: len(v) for k, v in per_variant.items()}, (_time.time() - t0) / 60)
+
+    if len(variants) > 1:
+        comparison = {}
+        for name, changes in variants:
+            saved = _set_cfg(cfg, changes)
+            try:
+                capped = apply_portfolio_caps(per_variant[name], cfg.MAX_SIGNALS_PER_DAY,
+                                              cfg.MAX_OPEN_POSITIONS)
+            finally:
+                _set_cfg(cfg, saved)
+            r = report(capped, name, {})
+            eq = [t for t in capped if t.get("asset") == "EQUITY"]
+            comparison[name] = {"changes": {k: str(v) for k, v in changes.items()},
+                                "all": r["overall"], "stocks_only": stats([t["r"] for t in eq]),
+                                "by_half": r.get("by_half"), "by_exit": r.get("by_exit"),
+                                "tp1_hit%": r.get("tp1_hit%")}
+            if not args.no_save:
+                try:
+                    save_trades(engine, capped, "cmp" + uuid.uuid4().hex[:6], args.preset + ":" + name)
+                except Exception as exc:
+                    logger.warning("Could not save %s: %s", name, exc)
+        for name, val in comparison.items():
+            logger.info("VARIANT %s %s", name, json.dumps(val, default=str))
+        logger.info("TOP REJECTIONS (base) %s",
+                    json.dumps(dict(sorted(rejects.items(), key=lambda x: -x[1])[:12])))
+        logger.info("BACKTEST DONE preset=%s minutes=%.1f", args.preset, (_time.time() - t0) / 60)
+        return 0
+
+    all_trades = per_variant[variants[0][0]]
 
     capped = apply_portfolio_caps(all_trades, cfg.MAX_SIGNALS_PER_DAY, cfg.MAX_OPEN_POSITIONS)
     notes = {"days": args.days, "symbols": len(symbols), "overrides": overrides,
