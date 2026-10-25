@@ -294,7 +294,11 @@ def start_health_server() -> None:
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("0.0.0.0", port), Health)
+    try:
+        server = HTTPServer(("0.0.0.0", port), Health)
+    except OSError as exc:
+        logger.warning("Health endpoint not started (%s) - continuing without it", exc)
+        return
     threading.Thread(target=server.serve_forever, daemon=True).start()
     logger.info("Health endpoint listening on :%d", port)
 
