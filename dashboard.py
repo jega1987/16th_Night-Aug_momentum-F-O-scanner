@@ -308,6 +308,45 @@ async def performance_page(request: Request,
     return templates.TemplateResponse(request, "performance.html", ctx)
 
 
+def _pnl_filter(period, date_from, date_to, group, symbol, asset, side, result, exit, basis):
+    import pnl_report
+    return pnl_report.PnlFilter(period=period, date_from=date_from or None, date_to=date_to or None,
+                                group=group, symbol=symbol or "", asset=asset, side=side,
+                                result=result, exit=exit, basis=basis)
+
+
+@app.get("/pnl")
+async def pnl_page(request: Request,
+                   period: str = Query(default="month"), date_from: Optional[str] = Query(default=None),
+                   date_to: Optional[str] = Query(default=None), group: str = Query(default="day"),
+                   symbol: Optional[str] = Query(default=None), asset: str = Query(default="all"),
+                   side: str = Query(default="all"), result: str = Query(default="all"),
+                   exit: str = Query(default="all"), basis: str = Query(default="option"),
+                   token: Optional[str] = Query(default=None), _=Depends(require_token)):
+    """Signals and P&L with date range, grouping and filters."""
+    import pnl_report
+    f = _pnl_filter(period, date_from, date_to, group, symbol, asset, side, result, exit, basis)
+    data = pnl_report.build(f)
+    ctx = {"token": token or "", "now": now_naive().strftime("%d %b %Y, %H:%M IST"),
+           "f": data["filter"], "summary": data["summary"], "chart": data["chart"],
+           "rows": data["rows"], "session": MarketClock.session_label()}
+    return templates.TemplateResponse(request, "pnl.html", ctx)
+
+
+@app.get("/api/pnl")
+async def api_pnl(period: str = Query(default="month"), date_from: Optional[str] = Query(default=None),
+                  date_to: Optional[str] = Query(default=None), group: str = Query(default="day"),
+                  symbol: Optional[str] = Query(default=None), asset: str = Query(default="all"),
+                  side: str = Query(default="all"), result: str = Query(default="all"),
+                  exit: str = Query(default="all"), basis: str = Query(default="option"),
+                  _=Depends(require_token)):
+    import pnl_report
+    f = _pnl_filter(period, date_from, date_to, group, symbol, asset, side, result, exit, basis)
+    data = pnl_report.build(f)
+    return {"filter": {k: v for k, v in vars(data["filter"]).items()},
+            "summary": data["summary"], "chart": data["chart"], "signals": data["rows"]}
+
+
 @app.get("/api/performance")
 async def api_performance(days: int = Query(default=30, ge=1, le=730),
                           tf: str = Query(default=None), _=Depends(require_token)):

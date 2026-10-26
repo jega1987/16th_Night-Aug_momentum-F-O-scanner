@@ -12,7 +12,7 @@ Lifecycle
 """
 import logging
 import math
-from datetime import time, timedelta
+from datetime import date, time, timedelta
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -197,6 +197,7 @@ class SignalEngine:
                         setup["symbol"], setup["direction"], plan.block_reason)
 
         scores = setup.get("scores", {})
+        opt = self._option_levels(plan, levels)
         with session_scope() as db:
             row = Signal(
                 timestamp=setup.get("timestamp") or now_naive(),
@@ -219,6 +220,11 @@ class SignalEngine:
                 option_theta_pct=(plan.theta_pct_per_day if plan else None),
                 option_blocked=bool(plan.blocked) if plan else False,
                 option_block_reason=(plan.block_reason if plan else None),
+                opt_entry=opt.get("opt_entry"), opt_sl=opt.get("opt_sl"),
+                opt_tp1=opt.get("opt_tp1"), opt_tp2=opt.get("opt_tp2"), opt_tp3=opt.get("opt_tp3"),
+                opt_ltp_now=opt.get("opt_entry"), opt_realized=0.0,
+                opt_pnl=(0.0 if opt.get("opt_entry") else None),
+                opt_qty_open=(levels["qty"] if opt.get("opt_entry") else None),
                 score_direction=scores.get("direction"),
                 score_squeeze=scores.get("squeeze"),
                 score_sweep=scores.get("sweep"),
@@ -260,6 +266,78 @@ class SignalEngine:
         return payload
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _option_levels(plan, levels: Dict) -> Dict:
+        """
+        Option premium at the entry, stop and targets. The entry is the live
+        quote; each level re-prices the same contract with Black-76 at that
+        stock/futures price, keeping today's IV and time to expiry, and shifts
+        it by the gap between model and market at the entry. An estimate:
+        IV changes and time decay move the real premium.
+        """
+        if (not plan or not plan.ltp or not plan.iv or not plan.expiry
+                or not plan.strike or plan.option_type not in ("CE", "PE")):
+            return {}
+        try:
+            from options_layer import black76_price, years_to_expiry
+            t = years_to_expiry(date.fromisoformat(str(plan.expiry)[:10]))
+            if t <= 0:
+                return {}
+            is_call = plan.option_type == "CE"
+            k, iv = float(plan.strike), float(plan.iv)
+            base = black76_price(float(levels["entry"]), k, t, iv, is_call)
+
+            def at(level):
+                return round(max(0.05, plan.ltp + black76_price(float(level), k, t, iv, is_call) - base), 2)
+
+            return {"opt_entry": round(float(plan.ltp), 2), "opt_sl": at(levels["sl"]),
+                    "opt_tp1": at(levels["tp1"]), "opt_tp2": at(levels["tp2"]),
+                    "opt_tp3": at(levels["tp3"])}
+        except Exception as exc:
+            logger.warning("[Engine] Option levels unavailable for %s: %s", plan.symbol, exc)
+            return {}
+
+    @staticmethod
+    async def _quote_option(feed, s: Dict) -> Optional[float]:
+        """Current premium (bid/ask mid where quoted) of the signal's contract."""
+        if not (s.get("opt_entry") and s.get("option_expiry") and s.get("atm_strike")
+                and s.get("option_type")):
+            return None
+        try:
+            exp = date.fromisoformat(str(s["option_expiry"])[:10])
+            q = await feed.get_option_quote(s["symbol"], {"date": exp}, int(s["atm_strike"]),
+                                            s["option_type"])
+            price = float((q or {}).get("ltp") or 0)
+            return price if price > 0 else None
+        except Exception as exc:
+            logger.debug("[Engine] Option re-quote failed for %s: %s", s.get("symbol"), exc)
+            return None
+
+    @staticmethod
+    def _update_option(s: Dict, price: Optional[float], qty_before: int) -> bool:
+        """
+        Follow the stock-level scale-outs with the option: quantity closed in
+        this cycle is booked at the current premium; the rest is marked to it.
+        Buying a CE (LONG) or PE (SHORT), so P&L is always premium change x qty.
+        """
+        entry = s.get("opt_entry")
+        if not entry:
+            return False
+        if price is None:
+            price = s.get("opt_ltp_now") or entry       # no fresh quote: last known
+        qty_after = s.get("qty_open") or 0
+        closed_qty = max(0, (qty_before or 0) - qty_after)
+        if closed_qty:
+            s["opt_realized"] = round((s.get("opt_realized") or 0) + (price - entry) * closed_qty, 2)
+        s["opt_qty_open"] = qty_after
+        s["opt_ltp_now"] = round(price, 2)
+        s["opt_updated_at"] = now_naive()
+        if s.get("status") in ("TP3", "SL", "TRAIL", "SQUAREOFF"):
+            s["opt_exit"] = round(price, 2)
+        s["opt_pnl"] = round((s.get("opt_realized") or 0) + (price - entry) * qty_after, 2)
+        return True
+
+    # ------------------------------------------------------------------ #
     async def manage_open_positions(self, feed) -> List[Dict]:
         """
         Walk every live signal: bank scale-outs, trail the stop, and close on
@@ -288,6 +366,12 @@ class SignalEngine:
             except Exception as exc:
                 logger.warning("[Engine] Cannot price %s this cycle: %s", symbol, exc)
 
+        opt_quotes: Dict[int, Optional[float]] = {}
+        if cfg.OPTION_TRACKING:
+            for snap in live:
+                if snap.get("opt_entry"):
+                    opt_quotes[snap["id"]] = await self._quote_option(feed, snap)
+
         square_off = MarketClock.should_square_off() and not cfg.is_positional
         updates = []
         for snap in live:
@@ -306,8 +390,11 @@ class SignalEngine:
             exit_reason = "Closed at the intraday square-off" if square_off else None
             if cfg.is_positional:
                 exit_reason = self._positional_exit_reason(snap)
+            qty_before = snap["qty_open"] if snap.get("qty_open") is not None else (snap.get("qty") or 0)
             changed = self._apply_rules(snap, ltp, trends.get(snap["symbol"]),
                                         exit_reason is not None, exit_reason)
+            if snap["id"] in opt_quotes:
+                changed = self._update_option(snap, opt_quotes[snap["id"]], qty_before) or changed
             if changed:
                 updates.append(snap)
 
@@ -319,8 +406,10 @@ class SignalEngine:
                         continue
                     for key in ("status", "tp1_hit", "tp2_hit", "qty_open", "trail_sl",
                                 "realized_pnl", "exit_price", "exit_time", "pnl",
-                                "pnl_pct", "r_multiple", "mfe", "notes"):
-                        setattr(row, key, snap[key])
+                                "pnl_pct", "r_multiple", "mfe", "notes",
+                                "opt_ltp_now", "opt_updated_at", "opt_exit", "opt_realized",
+                                "opt_pnl", "opt_qty_open"):
+                        setattr(row, key, snap.get(key))
 
             for snap in updates:
                 if snap["status"] in ("TP3", "SL", "TRAIL", "SQUAREOFF") and self.notifier:
@@ -472,6 +561,7 @@ class SignalEngine:
 
             sign = 1 if snap["direction"] == "LONG" else -1
             remaining = snap["qty_open"] or snap["qty"]
+            opt_price = await self._quote_option(feed, snap) if cfg.OPTION_TRACKING else None
             snap["realized_pnl"] = (snap["realized_pnl"] or 0) + self._leg_pnl(snap["entry"], ltp, remaining, sign)
             snap.update({
                 "qty_open": 0, "exit_price": round(ltp, 2), "exit_time": now_naive(),
@@ -480,6 +570,7 @@ class SignalEngine:
             risk = abs(snap["entry"] - snap["sl"]) or 1e-9
             snap["r_multiple"] = round(snap["pnl"] / (risk * max(snap["qty"], 1)), 3)
             snap["pnl_pct"] = round((snap["pnl"] / cfg.ACCOUNT_BALANCE) * 100, 3)
+            self._update_option(snap, opt_price, remaining)
             closed.append(snap)
 
         with session_scope() as db:
@@ -487,8 +578,10 @@ class SignalEngine:
                 row = db.get(Signal, snap["id"])
                 if row:
                     for key in ("status", "qty_open", "realized_pnl", "exit_price",
-                                "exit_time", "pnl", "pnl_pct", "r_multiple", "notes"):
-                        setattr(row, key, snap[key])
+                                "exit_time", "pnl", "pnl_pct", "r_multiple", "notes",
+                                "opt_ltp_now", "opt_updated_at", "opt_exit", "opt_realized",
+                                "opt_pnl", "opt_qty_open"):
+                        setattr(row, key, snap.get(key))
 
         logger.info("[Engine] Squared off %d open position(s)", len(closed))
         return closed

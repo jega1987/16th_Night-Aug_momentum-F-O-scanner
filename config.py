@@ -211,6 +211,8 @@ class StrategyConfig:
     OPTION_MIN_DTE: int = _int("OPTION_MIN_DTE", 7)
     # Cap on positions open at the same time, across days. 0 = no cap.
     MAX_OPEN_POSITIONS: int = _int("MAX_OPEN_POSITIONS", 0)
+    # Re-quote each open signal's option every minute and track option P&L.
+    OPTION_TRACKING: bool = _bool("OPTION_TRACKING", True)
 
     @property
     def is_positional(self) -> bool:
