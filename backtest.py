@@ -457,6 +457,18 @@ def save_trades(engine, trades: List[Dict], run_id: str, label: str) -> None:
     df.insert(0, "run_id", run_id)
     df.insert(1, "label", label)
     df["created_at"] = datetime.utcnow()
+    # New result fields (e.g. "setup") need their column on an existing table.
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    if insp.has_table("backtest_trades"):
+        have = {c["name"] for c in insp.get_columns("backtest_trades")}
+        with engine.begin() as conn:
+            for col in df.columns:
+                if col not in have:
+                    kind = "DOUBLE PRECISION" if pd.api.types.is_float_dtype(df[col]) else "TEXT"
+                    if pd.api.types.is_bool_dtype(df[col]):
+                        kind = "BOOLEAN"
+                    conn.execute(text(f'ALTER TABLE backtest_trades ADD COLUMN "{col}" {kind}'))
     df.to_sql("backtest_trades", engine, if_exists="append", index=False, chunksize=2000)
 
 
