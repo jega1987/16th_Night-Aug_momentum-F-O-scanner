@@ -123,6 +123,19 @@ class Signal(Base):
     option_theta_pct = Column(Float)        # premium burned per day, %
     option_blocked = Column(Boolean, default=False)
     option_block_reason = Column(String)
+    # Option premium levels (estimated at signal time by re-pricing the
+    # contract at the stock-level stop/targets) and live option tracking.
+    opt_entry = Column(Float)           # premium paid (live mid at signal)
+    opt_sl = Column(Float)              # est. premium if the stock-level stop is hit
+    opt_tp1 = Column(Float)
+    opt_tp2 = Column(Float)
+    opt_tp3 = Column(Float)
+    opt_ltp_now = Column(Float)         # latest re-quote while open
+    opt_updated_at = Column(DateTime)
+    opt_exit = Column(Float)            # premium at the final exit
+    opt_realized = Column(Float, default=0.0)   # booked option P&L from scale-outs
+    opt_pnl = Column(Float)             # option P&L in rupees (MTM while open)
+    opt_qty_open = Column(Integer)
 
     score_direction = Column(Float)
     score_squeeze = Column(Float)

@@ -126,7 +126,8 @@
   <span class="lbl">scanned {{ last_scan }}</span>
   <a class="btn {% if timeframe=='5m' %}on{% endif %}" href="?tf=5m{% if token %}&token={{ token }}{% endif %}">5m</a>
   <a class="btn {% if timeframe=='15m' %}on{% endif %}" href="?tf=15m{% if token %}&token={{ token }}{% endif %}">15m</a>
-  <a class="btn" href="/performance?tf={{ timeframe }}{% if token %}&token={{ token }}{% endif %}">P&amp;L</a>
+  <a class="btn" href="/pnl{% if token %}?token={{ token }}{% endif %}">Signals &amp; P&amp;L</a>
+  <a class="btn" href="/performance?tf={{ timeframe }}{% if token %}&token={{ token }}{% endif %}">Analysis</a>
   <button class="btn" id="scan">Scan now</button>
 </header>
 
@@ -202,7 +203,7 @@
   <div class="stat"><div class="lbl">watchlist</div><div class="v num">{{ watchlist_size }}</div></div>
   <div class="stat"><div class="lbl">still open</div><div class="v num">{{ open_signals }}</div></div>
   <div class="stat"><div class="lbl">win rate</div><div class="v num">{{ win_rate }}%</div></div>
-  <div class="stat"><div class="lbl">paper p&amp;l</div>
+  <div class="stat"><div class="lbl">paper p&amp;l today</div>
     <div class="v num {% if total_pnl > 0 %}up{% elif total_pnl < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(total_pnl) }}</div></div>
 </div>
 
@@ -212,34 +213,45 @@
   <div class="scroll">
   <table>
     <thead><tr>
-      <th>Time</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Stop</th>
-      <th>T1 / T2 / T3</th><th>Qty</th><th>Option</th><th>Score</th><th>Status</th><th>P&amp;L</th>
+      <th>Time</th><th>Symbol</th><th>Side</th><th>Option</th><th>Buy</th><th>SL</th>
+      <th>T1 / T2 / T3</th><th>Now</th><th>Lots</th><th>Status</th><th>Opt P&amp;L</th>
     </tr></thead>
     <tbody>
     {% for sig in recent_signals %}
       <tr class="sig" data-row="{{ loop.index }}">
         <td class="num">{{ sig.timestamp.strftime('%d-%m %H:%M') if sig.timestamp else '—' }}</td>
         <td>{{ sig.symbol }}</td>
-        <td><span class="tag" style="color:{{ 'var(--long)' if sig.direction=='LONG' else 'var(--short)' }}">{{ sig.direction }}</span></td>
-        <td class="num">{{ '{:,.2f}'.format(sig.entry or 0) }}</td>
-        <td class="num">{{ '{:,.2f}'.format(sig.trail_sl or sig.sl or 0) }}</td>
-        <td class="num">{{ '{:,.0f}'.format(sig.tp1 or 0) }} / {{ '{:,.0f}'.format(sig.tp2 or 0) }} / {{ '{:,.0f}'.format(sig.tp3 or 0) }}</td>
-        <td class="num">{{ sig.qty }}</td>
+        <td><span class="tag" style="color:{{ 'var(--long)' if sig.direction=='LONG' else 'var(--short)' }}">{{ 'CALL' if sig.direction=='LONG' else 'PUT' }}</span></td>
         <td>
-          {% if sig.option_blocked %}
-            <span class="tag" style="color:var(--hold)" title="{{ sig.option_block_reason }}">blocked</span>
-          {% elif sig.atm_strike %}
-            <span class="num">{{ sig.atm_strike }} {{ sig.option_type or '' }}</span>
-          {% else %}—{% endif %}
+          {% if sig.atm_strike %}<span class="num">{{ sig.atm_strike }} {{ sig.option_type or '' }}</span>{% else %}—{% endif %}
+          {% if sig.option_blocked %} <span class="tag" style="color:var(--hold)" title="{{ sig.option_block_reason }}">gate</span>{% endif %}
         </td>
-        <td class="num">{{ '{:.2f}'.format(sig.composite_score or 0) }}</td>
+        {% if sig.opt_entry %}
+        {% set closed = sig.status in ['TP3','SL','TRAIL','SQUAREOFF'] %}
+        {% set now_px = sig.opt_exit if closed else sig.opt_ltp_now %}
+        <td class="num">{{ '{:,.2f}'.format(sig.opt_entry) }}</td>
+        <td class="num down">{{ '{:,.2f}'.format(sig.opt_sl or 0) }}</td>
+        <td class="num">{{ '{:,.1f}'.format(sig.opt_tp1 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp2 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp3 or 0) }}</td>
+        <td class="num">{{ '{:,.2f}'.format(now_px) if now_px else '—' }}</td>
+        {% else %}
+        <td class="flat" colspan="4" style="text-align:center">no option prices{% if sig.option_ltp %} · premium {{ sig.option_ltp }}{% endif %}</td>
+        {% endif %}
+        <td class="num">{{ sig.lots or '—' }}</td>
         <td>{{ sig.status }}</td>
-        <td class="num {% if (sig.pnl or 0) > 0 %}up{% elif (sig.pnl or 0) < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(sig.pnl or 0) }}</td>
+        {% set op = sig.opt_pnl if sig.opt_entry else none %}
+        {% if op is not none %}
+        <td class="num {% if op > 0 %}up{% elif op < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(op) }}</td>
+        {% else %}
+        <td class="num {% if (sig.pnl or 0) > 0 %}up{% elif (sig.pnl or 0) < 0 %}down{% endif %}" title="stock-level P&amp;L (no option data)">{{ '{:+,.0f}'.format(sig.pnl or 0) }}*</td>
+        {% endif %}
       </tr>
       <tr class="factors" id="f{{ loop.index }}" hidden>
         <td colspan="11">
           <div class="chips">
             {% if sig.option_hint %}<span class="chip">{{ sig.option_hint }}</span>{% endif %}
+            <span class="chip">stock entry {{ '{:,.2f}'.format(sig.entry or 0) }} · stop {{ '{:,.2f}'.format(sig.trail_sl or sig.sl or 0) }} · T {{ '{:,.0f}'.format(sig.tp1 or 0) }} / {{ '{:,.0f}'.format(sig.tp2 or 0) }} / {{ '{:,.0f}'.format(sig.tp3 or 0) }}</span>
+            <span class="chip">stock-level p&amp;l {{ '{:+,.0f}'.format(sig.pnl or 0) }}</span>
+            <span class="chip">score {{ '{:.2f}'.format(sig.composite_score or 0) }}</span>
             {% if sig.option_ltp %}<span class="chip">premium {{ sig.option_ltp }}</span>{% endif %}
             {% if sig.option_iv %}<span class="chip">IV {{ '{:.1f}'.format(sig.option_iv * 100) }}%{% if sig.option_iv_rank is not none %} · rank {{ '{:.0f}'.format(sig.option_iv_rank) }}{% else %} · rank pending{% endif %}</span>{% endif %}
             {% if sig.option_delta %}<span class="chip">delta {{ '{:.2f}'.format(sig.option_delta) }}</span>{% endif %}
