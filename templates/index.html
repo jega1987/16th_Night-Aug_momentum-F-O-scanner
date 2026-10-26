@@ -224,6 +224,7 @@
         <td><span class="tag" style="color:{{ 'var(--long)' if sig.direction=='LONG' else 'var(--short)' }}">{{ 'CALL' if sig.direction=='LONG' else 'PUT' }}</span></td>
         <td>
           {% if sig.atm_strike %}<span class="num">{{ sig.atm_strike }} {{ sig.option_type or '' }}</span>{% else %}—{% endif %}
+          {% set exp = sig|expiry_label %}{% if exp %}<div class="lbl num" style="text-transform:none;letter-spacing:.02em">exp {{ exp }}</div>{% endif %}
           {% if sig.option_blocked %} <span class="tag" style="color:var(--hold)" title="{{ sig.option_block_reason }}">gate</span>{% endif %}
         </td>
         {% if sig.opt_entry %}
