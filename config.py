@@ -93,6 +93,14 @@ class StrategyConfig:
     # price clears it. Measure the breakout level over the most recent
     # stretch of the compression instead.
     SQUEEZE_RANGE_MAX_BARS: int = _int("SQUEEZE_RANGE_MAX_BARS", 20)
+    # Which coil detectors count as a setup: "ttm" (Bollinger inside Keltner,
+    # the original rule), "box" (tight-range box) or "either" (TTM first,
+    # then the box). The box is a run of >= MIN_SQUEEZE_BARS bars whose
+    # combined high-low range is at most BOX_MAX_WIDTH_ATR x the average true
+    # range of the previous BOX_ATR_BARS bars (75 x 15m = about 3 sessions).
+    SQUEEZE_DETECTOR: str = os.getenv("SQUEEZE_DETECTOR", "ttm").strip().lower()
+    BOX_MAX_WIDTH_ATR: float = _float("BOX_MAX_WIDTH_ATR", 2.0)
+    BOX_ATR_BARS: int = _int("BOX_ATR_BARS", 75)
 
     # ---------- confluence ----------
     SWEEP_LOOKBACK: int = _int("SWEEP_LOOKBACK", 10)

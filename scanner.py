@@ -17,7 +17,7 @@ from database import IndexSnapshot, OISnapshot, ScanLog, Signal, session_scope
 from feed_base import MarketFeed
 from feed_ws import _floor_to_bar
 from filters import FilterEngine
-from indicators import atr, bars_since, daily_change_pct, detect_squeeze
+from indicators import atr, bars_since, compression_setups, daily_change_pct
 
 logger = logging.getLogger(__name__)
 
@@ -373,11 +373,12 @@ class IndexScanner:
         if df is None or df.empty:
             return False
         try:
-            in_sqz, dur, fired = detect_squeeze(df, cfg.BB_LENGTH, cfg.BB_MULT,
-                                                cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS)
-            if hybrid and bool(in_sqz.iloc[-1]) and int(dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS:
-                return True
-            return bars_since(fired) <= cfg.MAX_BARS_SINCE_FIRE
+            for _name, in_sqz, dur, fired in compression_setups(df, cfg):
+                if hybrid and bool(in_sqz.iloc[-1]) and int(dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS:
+                    return True
+                if bars_since(fired) <= cfg.MAX_BARS_SINCE_FIRE:
+                    return True
+            return False
         except Exception:
             return True   # when in doubt, do the full check
 

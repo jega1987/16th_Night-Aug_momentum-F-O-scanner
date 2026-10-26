@@ -4,7 +4,7 @@ these is unit-testable offline against synthetic candles.
 
 Expected columns: timestamp, open, high, low, close, volume
 """
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -94,6 +94,62 @@ def detect_squeeze(df: pd.DataFrame, bb_len: int = 20, bb_mult: float = 2.0,
     squeeze_duration = in_squeeze.astype(int).groupby(groups).cumsum()
     fired = (squeeze_duration.shift(1).fillna(0) >= min_bars) & (~in_squeeze)
     return in_squeeze, squeeze_duration, fired.fillna(False)
+
+
+def detect_box(df: pd.DataFrame, max_width_atr: float = 2.0, min_bars: int = 6,
+               atr_len: int = 75, max_len: int = 40):
+    """
+    Tight-range box: the longest run of bars ending at each bar whose combined
+    high-low range is at most `max_width_atr` x the average true range of the
+    previous `atr_len` bars. Catches the flat afternoon coil that follows a
+    trending morning - the case Bollinger-inside-Keltner misses, because a
+    20-bar Bollinger band keeps the morning trend in its window for hours.
+
+    Same return shape as detect_squeeze: (in_box, duration, fired), where
+    in_box needs at least `min_bars` bars and `fired` marks the first bar
+    after a qualifying box that breaks it.
+    """
+    n = len(df)
+    highs = df["high"].to_numpy(dtype=float)
+    lows = df["low"].to_numpy(dtype=float)
+    ref = true_range(df).rolling(atr_len, min_periods=max(20, atr_len // 3)).mean().shift(1)
+    ref = ref.to_numpy(dtype=float)
+    length = np.zeros(n, dtype=int)
+    for j in range(n):
+        if not np.isfinite(ref[j]) or ref[j] <= 0:
+            continue
+        cap = max_width_atr * ref[j]
+        hi, lo, k = highs[j], lows[j], j
+        while k - 1 >= 0 and j - k + 1 < max_len:
+            nh, nl = max(hi, highs[k - 1]), min(lo, lows[k - 1])
+            if nh - nl > cap:
+                break
+            hi, lo, k = nh, nl, k - 1
+        length[j] = j - k + 1 if hi - lo <= cap else 0
+    in_box = pd.Series(length >= min_bars, index=df.index)
+    duration = pd.Series(np.where(in_box, length, 0), index=df.index)
+    fired = (in_box.shift(1, fill_value=False)) & (~in_box)
+    return in_box, duration, fired
+
+
+def compression_setups(df: pd.DataFrame, cfg) -> List[Tuple[str, pd.Series, pd.Series, pd.Series]]:
+    """
+    The coil detectors switched on by cfg.SQUEEZE_DETECTOR, in priority order:
+      "ttm"    - Bollinger inside Keltner only (the original rule)
+      "box"    - tight-range box only
+      "either" - TTM first, then the box
+    Each item is (name, in_coil, duration, fired).
+    """
+    mode = (getattr(cfg, "SQUEEZE_DETECTOR", "ttm") or "ttm").lower()
+    out = []
+    if mode in ("ttm", "either"):
+        out.append(("ttm",) + tuple(detect_squeeze(
+            df, cfg.BB_LENGTH, cfg.BB_MULT, cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS)))
+    if mode in ("box", "either"):
+        out.append(("box",) + tuple(detect_box(
+            df, getattr(cfg, "BOX_MAX_WIDTH_ATR", 2.0), cfg.MIN_SQUEEZE_BARS,
+            getattr(cfg, "BOX_ATR_BARS", 75), cfg.SQUEEZE_RANGE_MAX_BARS * 2)))
+    return out
 
 
 def bars_since(flags: pd.Series) -> int:
