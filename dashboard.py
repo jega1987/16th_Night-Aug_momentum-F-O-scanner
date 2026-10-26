@@ -25,6 +25,28 @@ app = FastAPI(title="Index Squeeze Scanner", docs_url="/docs", redoc_url=None)
 templates = Jinja2Templates(directory="templates")
 
 
+def _expiry_label(expiry=None, hint=None) -> str:
+    """'2026-11-23' -> '23 Nov · 28d left'. Falls back to the date at the end
+    of the option hint ('JUBLFOOD 400 CE 2026-11-23') for older rows."""
+    from datetime import date as _date
+    raw = (str(expiry)[:10] if expiry else "") or ""
+    if not raw and hint:
+        tail = str(hint).split()[-1]
+        raw = tail if len(tail) == 10 and tail[4] == "-" else ""
+    try:
+        d = _date.fromisoformat(raw)
+    except ValueError:
+        return ""
+    days = (d - now_naive().date()).days
+    left = "expired" if days < 0 else ("expires today" if days == 0 else f"{days}d left")
+    return f"{d.day} {d.strftime('%b')} · {left}"
+
+
+templates.env.filters["expiry_label"] = lambda sig: _expiry_label(
+    getattr(sig, "option_expiry", None) if not isinstance(sig, dict) else sig.get("expiry"),
+    getattr(sig, "option_hint", None) if not isinstance(sig, dict) else sig.get("option_hint"))
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """

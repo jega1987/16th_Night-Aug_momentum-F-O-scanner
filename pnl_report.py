@@ -196,7 +196,7 @@ def row_view(r: Signal, basis: str = "option") -> Dict:
         "symbol": r.symbol, "asset": r.asset_class,
         "side": "CALL" if r.direction == "LONG" else "PUT",
         "contract": (f"{int(r.atm_strike)} {r.option_type or ''}".strip() if r.atm_strike else None),
-        "expiry": r.option_expiry,
+        "expiry": r.option_expiry, "option_hint": r.option_hint,
         "lots": r.lots, "qty": r.qty,
         "opt_entry": r.opt_entry, "opt_sl": r.opt_sl, "opt_tp1": r.opt_tp1,
         "opt_tp2": r.opt_tp2, "opt_tp3": r.opt_tp3,

@@ -172,7 +172,7 @@
         <td class="num">{{ r.time or '—' }}</td>
         <td class="l">{{ r.symbol }}</td>
         <td class="l"><span class="tag" style="color:{{ 'var(--long)' if r.side=='CALL' else 'var(--short)' }}">{{ r.side }}</span></td>
-        <td class="l num">{{ r.contract or '—' }}{% if r.expiry %} <span class="flat">{{ r.expiry[5:] }}</span>{% endif %}</td>
+        <td class="l num">{{ r.contract or '—' }}{% set exp = r|expiry_label %}{% if exp %}<div class="flat" style="font-size:11px">exp {{ exp }}</div>{% endif %}</td>
         {% if r.opt_entry %}
         <td class="num">{{ '{:,.2f}'.format(r.opt_entry) }}</td>
         <td class="num down">{{ '{:,.2f}'.format(r.opt_sl) if r.opt_sl else '—' }}</td>
