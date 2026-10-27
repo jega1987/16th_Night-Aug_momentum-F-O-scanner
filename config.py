@@ -73,6 +73,14 @@ class StrategyConfig:
     STRIKE_STEPS: Dict[str, int] = field(
         default_factory=lambda: _json("STRIKE_STEPS", {"NIFTY 50": 50, "BANKNIFTY": 100, "SENSEX": 100})
     )
+    # Stock options: pick the nearest listed strike that is a multiple of a
+    # round step for the price level - {"min_price": step, ...}. Liquidity
+    # sits on round strikes (ICICIGI 1500/1600, not 1540/1560).
+    ROUND_STRIKES: bool = _bool("ROUND_STRIKES", True)
+    ROUND_STRIKE_BANDS: Dict = field(
+        default_factory=lambda: _json("ROUND_STRIKE_BANDS",
+                                      {"1000": 100, "300": 50, "100": 25, "0": 5})
+    )
 
     # ---------- timeframe ----------
     TIMEFRAME: str = os.getenv("SCAN_TIMEFRAME", "5m")
