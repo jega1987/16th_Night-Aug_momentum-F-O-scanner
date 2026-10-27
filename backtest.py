@@ -126,6 +126,31 @@ class MarketState:
 MARKET: Optional[MarketState] = None
 
 
+class VixState:
+    """
+    INDIA VIX regime, causal: the previous session's daily close ranked
+    against the prior 120 sessions (0-100 percentile).
+    """
+
+    def __init__(self, daily: pd.DataFrame):
+        d = daily.sort_values("timestamp").reset_index(drop=True)
+        d["date"] = pd.to_datetime(d["timestamp"]).dt.date
+        closes = d["close"].astype(float)
+        pct = closes.rolling(120, min_periods=40).apply(
+            lambda w: (w[:-1] < w[-1]).mean() * 100 if len(w) > 1 else np.nan, raw=True)
+        # Known the next morning: shift so day D uses D-1's close.
+        self.by_date = dict(zip(d["date"], pct.shift(1)))
+        self.level = dict(zip(d["date"], closes.shift(1)))
+
+    def pct(self, day) -> Optional[float]:
+        v = self.by_date.get(day)
+        return None if v is None or (isinstance(v, float) and np.isnan(v)) else float(v)
+
+
+VIX: Optional[VixState] = None
+SECTOR_MAP: Dict[str, str] = {}
+
+
 class SymbolBacktest:
     """Signals and simulated trades for one symbol."""
 
@@ -401,6 +426,12 @@ class SymbolBacktest:
                     return "market filter (NIFTY trend/ADX)"
             if getattr(cfg, "BT_DAY_FILTER", False) and m["day"] != want:
                 return "market filter (NIFTY vs day open)"
+        vmin, vmax = getattr(cfg, "BT_VIX_PCT_MIN", None), getattr(cfg, "BT_VIX_PCT_MAX", None)
+        if VIX is not None and (vmin is not None or vmax is not None):
+            p = VIX.pct(pd.Timestamp(close_ts).date())
+            t["vix_pct"] = None if p is None else round(p, 1)
+            if p is not None and ((vmin is not None and p < vmin) or (vmax is not None and p > vmax)):
+                return "VIX regime"
         if getattr(cfg, "BT_ST_ALIGN", False) and len(self.q15) > cfg.ST_PERIOD + 2:
             if not hasattr(self, "_st_dir"):
                 from indicators import supertrend
@@ -448,6 +479,25 @@ def apply_portfolio_caps(trades: List[Dict], max_per_day: int, max_open: int) ->
             continue
         if max_open and len(open_exits) >= max_open:
             continue
+        day_lim = float(getattr(_cfg, "BT_DAY_LOSS_R", 0) or 0)
+        week_lim = float(getattr(_cfg, "BT_WEEK_LOSS_R", 0) or 0)
+        if day_lim or week_lim:
+            now_ts = pd.Timestamp(now)
+            d0 = now_ts.normalize(); w0 = d0 - pd.Timedelta(days=d0.weekday())
+            closed_r = [(pd.Timestamp(x["exit_time"]), x["r"]) for x in taken
+                        if pd.Timestamp(x["exit_time"]) <= now_ts]
+            if day_lim and sum(r for e, r in closed_r if e >= d0) <= -day_lim:
+                continue
+            if week_lim and sum(r for e, r in closed_r if e >= w0) <= -week_lim:
+                continue
+        sec_max = int(getattr(_cfg, "BT_SECTOR_MAX", 0) or 0)
+        if sec_max and SECTOR_MAP:
+            sec = SECTOR_MAP.get(t["symbol"])
+            if sec:
+                same = sum(1 for x in taken if x["direction"] == t["direction"]
+                           and SECTOR_MAP.get(x["symbol"]) == sec and x["exit_time"] > now)
+                if same >= sec_max:
+                    continue
         if cluster_n:
             now_ts = pd.Timestamp(now)
             near = sum(1 for x in taken if x["direction"] == t["direction"]
@@ -483,6 +533,34 @@ def breakdown(df: pd.DataFrame, col: str, bins=None, labels=None) -> Dict:
     for k, g in d.groupby(col, observed=True):
         out[str(k)] = stats(g["r"].tolist())
     return out
+
+
+def walk_forward(capped: Dict[str, List[Dict]], lookback_months: int = 2) -> Dict:
+    """
+    Pick, at the start of each month, the variant with the best total R over
+    the previous `lookback_months`, and keep only its trades for that month.
+    The result is out-of-sample: every month is traded with a choice made
+    before it began. Compared with always using the first (live) variant.
+    """
+    months = sorted({t["entry_time"][:7] for v in capped.values() for t in v})
+    if len(months) <= lookback_months:
+        return {}
+    names = list(capped)
+    by = {n: {} for n in names}
+    for n in names:
+        for t in capped[n]:
+            by[n].setdefault(t["entry_time"][:7], []).append(t["r"])
+    chosen, oos, base = [], [], []
+    for i in range(lookback_months, len(months)):
+        past = months[i - lookback_months:i]
+        score = {n: sum(sum(by[n].get(m, [])) for m in past) for n in names}
+        pick = max(names, key=lambda n: (score[n], n == names[0]))
+        m = months[i]
+        chosen.append({"month": m, "pick": pick, "in_sample_R": round(score[pick], 1),
+                       "month_R": round(sum(by[pick].get(m, [])), 1)})
+        oos += by[pick].get(m, [])
+        base += by[names[0]].get(m, [])
+    return {"months": chosen, "walk_forward": stats(oos), names[0] + " (same months)": stats(base)}
 
 
 def report(trades: List[Dict], label: str, notes: Dict) -> Dict:
@@ -548,6 +626,16 @@ PRESETS = {
     "base": [("live-rules", {})],
     # 27-Oct review: trend day (+) vs range day (-). Market-context gates,
     # Supertrend agreement at entry, same-direction clustering, late entries.
+    # Risk controls: VIX regime, loss limits, sector cap (plus walk-forward).
+    "risk": [
+        ("live-rules", {}),
+        ("vix-skip-top-25pct", {"BT_VIX_PCT_MAX": 75.0}),
+        ("vix-skip-bottom-25pct", {"BT_VIX_PCT_MIN": 25.0}),
+        ("vix-middle-only", {"BT_VIX_PCT_MIN": 25.0, "BT_VIX_PCT_MAX": 75.0}),
+        ("loss-limits-2R-day-5R-week", {"BT_DAY_LOSS_R": 2.0, "BT_WEEK_LOSS_R": 5.0}),
+        ("sector-cap-2", {"BT_SECTOR_MAX": 2}),
+        ("all-risk", {"BT_DAY_LOSS_R": 2.0, "BT_WEEK_LOSS_R": 5.0, "BT_SECTOR_MAX": 2}),
+    ],
     "regime": [
         ("live-rules", {}),
         ("nifty-trend-adx20", {"BT_MKT_FILTER": True, "BT_MKT_ADX": 20.0}),
@@ -624,6 +712,23 @@ def main(argv=None) -> int:
             logger.info("Market context: NIFTY 50, %d bars", len(nifty))
     except Exception as exc:
         logger.warning("Market context unavailable: %s", exc)
+    global VIX, SECTOR_MAP
+    try:
+        from sqlalchemy import text as _text
+        with engine.connect() as conn:
+            vix = pd.read_sql(_text("SELECT timestamp, close FROM hist_candles WHERE symbol = 'INDIA VIX' "
+                                    "AND timeframe = '1d' ORDER BY timestamp"), conn)
+        if len(vix) > 60:
+            VIX = VixState(vix)
+            logger.info("VIX context: %d daily closes", len(vix))
+    except Exception as exc:
+        logger.warning("VIX context unavailable: %s", exc)
+    try:
+        import sectors
+        SECTOR_MAP = dict(sectors.load())
+        logger.info("Sector map: %d symbols", len(SECTOR_MAP))
+    except Exception as exc:
+        logger.warning("Sector map unavailable: %s", exc)
     store = CandleStore.__new__(CandleStore)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()] or list_symbols(engine)
     logger.info("Backtest '%s': %d symbols, %d days | mode=%s squeeze=%s ADX eq>%s idx>%s "
@@ -662,6 +767,7 @@ def main(argv=None) -> int:
 
     if len(variants) > 1:
         comparison = {}
+        capped_by: Dict[str, List[Dict]] = {}
         for name, changes in variants:
             saved = _set_cfg(cfg, changes)
             try:
@@ -669,6 +775,7 @@ def main(argv=None) -> int:
                                               cfg.MAX_OPEN_POSITIONS)
             finally:
                 _set_cfg(cfg, saved)
+            capped_by[name] = capped
             r = report(capped, name, {})
             eq = [t for t in capped if t.get("asset") == "EQUITY"]
             comparison[name] = {"changes": {k: str(v) for k, v in changes.items()},
@@ -684,6 +791,12 @@ def main(argv=None) -> int:
                     logger.warning("Could not save %s: %s", name, exc)
         for name, val in comparison.items():
             logger.info("VARIANT %s %s", name, json.dumps(val, default=str))
+        try:
+            wf = walk_forward(capped_by)
+            if wf:
+                logger.info("WALKFORWARD %s", json.dumps(wf, default=str))
+        except Exception as exc:
+            logger.warning("Walk-forward failed: %s", exc)
         logger.info("TOP REJECTIONS (base) %s",
                     json.dumps(dict(sorted(rejects.items(), key=lambda x: -x[1])[:12])))
         logger.info("BACKTEST DONE preset=%s minutes=%.1f", args.preset, (_time.time() - t0) / 60)
