@@ -286,6 +286,43 @@ class ScanLog(Base):
     factors = Column(JSON)
 
 
+class WatchSignal(Base):
+    """
+    Watch-only signals from a setup that is not traded (the tight-range box).
+    Recorded when the live rules rejected the bar but the watched setup
+    passed every check. Never traded and never in the P&L; the outcome is
+    scored afterwards from stored candles with the same stop, targets,
+    scale-out and holding period as a real trade (no Supertrend trail).
+    """
+    __tablename__ = "watch_signals"
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime, default=now_naive, index=True)
+    bar_time = Column(DateTime)
+    setup = Column(String, index=True)
+    symbol = Column(String, index=True)
+    direction = Column(String)
+    entry = Column(Float)
+    sl = Column(Float)
+    tp1 = Column(Float)
+    tp2 = Column(Float)
+    tp3 = Column(Float)
+    range_high = Column(Float)
+    range_low = Column(Float)
+    coil_bars = Column(Integer)
+    adx_value = Column(Float)
+    rsi_value = Column(Float)
+    vol_ratio = Column(Float)
+    composite_score = Column(Float)
+    live_reason = Column(String)          # why the live rules said no
+    status = Column(String, default="OPEN", index=True)   # OPEN | CLOSED
+    outcome = Column(String)              # SL | TP1 | TP2 | TP3 | TIME | BE
+    r_multiple = Column(Float)
+    mfe_r = Column(Float)
+    exit_price = Column(Float)
+    exit_time = Column(DateTime)
+    checked_at = Column(DateTime)
+
+
 class ScripMapping(Base):
     __tablename__ = "scrip_mappings"
     id = Column(Integer, primary_key=True)

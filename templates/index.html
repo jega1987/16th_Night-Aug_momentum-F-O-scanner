@@ -128,6 +128,7 @@
   <a class="btn {% if timeframe=='15m' %}on{% endif %}" href="?tf=15m{% if token %}&token={{ token }}{% endif %}">15m</a>
   <a class="btn" href="/pnl{% if token %}?token={{ token }}{% endif %}">Signals &amp; P&amp;L</a>
   <a class="btn" href="/performance?tf={{ timeframe }}{% if token %}&token={{ token }}{% endif %}">Analysis</a>
+  <a class="btn" href="/watch{% if token %}?token={{ token }}{% endif %}">Watch (Box)</a>
   <button class="btn" id="scan">Scan now</button>
 </header>
 

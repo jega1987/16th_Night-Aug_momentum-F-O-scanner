@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watch-only setups</title>
+<style>
+  :root{
+    --ink:#11151b; --panel:#171d25; --panel-2:#1d242e; --rule:#2b3540;
+    --text:#e4e8ec; --muted:#8593a1; --faint:#5c6875;
+    --long:#3fcf8e; --short:#e8566b; --hold:#e0a53c; --cool:#6aa8ff;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--ink); color:var(--text); font-family:var(--mono); font-size:13px;
+       line-height:1.5; -webkit-font-smoothing:antialiased; padding:18px 16px 60px; max-width:1240px; margin:0 auto}
+  a{color:inherit}
+  .lbl{font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint)}
+  .num{font-variant-numeric:tabular-nums; letter-spacing:-.01em}
+  .up{color:var(--long)} .down{color:var(--short)} .flat{color:var(--muted)}
+  header{display:flex; flex-wrap:wrap; gap:10px; align-items:baseline;
+         border-bottom:1px solid var(--rule); padding-bottom:14px; margin-bottom:16px}
+  h1{font-size:15px; font-weight:600; letter-spacing:.02em}
+  .spacer{flex:1}
+  .btn{font:inherit; font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+       background:var(--panel-2); color:var(--text); border:1px solid var(--rule);
+       border-radius:2px; padding:5px 11px; cursor:pointer; text-decoration:none; display:inline-block}
+  .btn:hover{border-color:var(--cool); color:var(--cool)}
+  .btn.on{background:var(--cool); border-color:var(--cool); color:#0d1117}
+  .btn:focus-visible, select:focus-visible, input:focus-visible{outline:2px solid var(--cool); outline-offset:1px}
+  form.filters{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px;
+       background:var(--panel); border:1px solid var(--rule); border-radius:3px; padding:12px; margin-bottom:16px}
+  form.filters label{display:flex; flex-direction:column; gap:4px}
+  select, input[type=text], input[type=date]{font:inherit; font-size:12px; background:var(--panel-2);
+       color:var(--text); border:1px solid var(--rule); border-radius:2px; padding:6px 8px; width:100%}
+  input::placeholder{color:var(--faint)}
+  .actions{display:flex; gap:8px; align-items:flex-end}
+  .banner{border:1px solid color-mix(in srgb,var(--hold) 45%,transparent);
+          background:color-mix(in srgb,var(--hold) 8%,transparent); color:var(--hold);
+          border-radius:3px; padding:9px 12px; margin-bottom:14px; font-size:11.5px}
+  .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(135px,1fr));
+         border:1px solid var(--rule); border-radius:3px; margin-bottom:16px; background:var(--panel)}
+  .stat{padding:11px 14px; border-right:1px solid var(--rule); border-bottom:1px solid var(--rule)}
+  .stat .v{font-size:18px; font-weight:600; margin-top:3px}
+  .stat .s{font-size:11px; color:var(--muted)}
+  .chartbox{background:var(--panel); border:1px solid var(--rule); border-radius:3px; padding:12px; margin-bottom:18px}
+  .chartwrap{position:relative; height:260px}
+  section{margin-bottom:22px}
+  .shead{display:flex; flex-wrap:wrap; align-items:baseline; gap:10px; margin-bottom:8px}
+  .scroll{overflow-x:auto; -webkit-overflow-scrolling:touch}
+  table{width:100%; border-collapse:collapse; font-size:12px}
+  th{font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--faint);
+     text-align:right; padding:6px 8px; border-bottom:1px solid var(--rule); font-weight:400; white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  th.l, td.l{text-align:left}
+  td{padding:7px 8px; border-bottom:1px solid var(--panel-2); text-align:right; white-space:nowrap}
+  tr.grp th{border-bottom:0; padding-bottom:0; color:var(--muted)}
+  .tag{font-size:10px; letter-spacing:.1em; padding:2px 6px; border-radius:2px; border:1px solid currentColor}
+  .hit{color:var(--long)}
+  .empty{border:1px dashed var(--rule); border-radius:3px; padding:22px; text-align:center; color:var(--muted)}
+  footer{border-top:1px solid var(--rule); padding-top:12px; color:var(--faint); font-size:11px}
+  @media (max-width:640px){ body{padding:14px 11px 50px} .stat .v{font-size:16px} .chartwrap{height:220px} }
+</style>
+</head>
+<body>
+{% set tq = ('&token=' ~ token) if token else '' %}
+{% set s = summary %}
+<header>
+  <h1>Watch only &middot; Box setup</h1>
+  <span class="lbl">not traded &middot; not in P&amp;L</span>
+  <div class="spacer"></div>
+  <a class="btn" href="/?{{ tq[1:] }}">Live</a>
+  <a class="btn" href="/pnl?{{ tq[1:] }}">Signals &amp; P&amp;L</a>
+  <a class="btn" href="/performance?{{ tq[1:] }}">Analysis</a>
+</header>
+
+{% if not enabled %}
+<div class="banner">Watch mode is switched off (WATCH_DETECTOR is empty). Rows below are from when it was on.</div>
+{% endif %}
+<div class="banner">A box is {{ min_bars }}+ completed 15-minute candles whose total range is at most {{ width }}&times; the stock's usual 15-minute range. A signal is logged when a 5-minute candle closes outside the box, passes the same volume / ADX / RSI / score checks as live signals, and the live squeeze rule did not fire. Results use the live stop, targets, 50/30/20 scale-out and {{ hold }}-day time stop, without the Supertrend trail &mdash; a yardstick for comparison, not a trade record.</div>
+
+<div class="stats">
+  <div class="stat"><div class="lbl">Signals</div><div class="v num">{{ s.signals }}</div><div class="s">last {{ days }} days</div></div>
+  <div class="stat"><div class="lbl">Closed / open</div><div class="v num">{{ s.closed }} / {{ s.open }}</div></div>
+  <div class="stat"><div class="lbl">Win rate</div><div class="v num">{{ s.win_rate if s.win_rate is not none else '—' }}{% if s.win_rate is not none %}%{% endif %}</div></div>
+  <div class="stat"><div class="lbl">Reached TP1</div><div class="v num">{{ s.tp1_rate if s.tp1_rate is not none else '—' }}{% if s.tp1_rate is not none %}%{% endif %}</div></div>
+  <div class="stat"><div class="lbl">Avg R</div><div class="v num {{ 'up' if (s.avg_r or 0) > 0 else ('down' if (s.avg_r or 0) < 0 else 'flat') }}">{{ '%+.2f'|format(s.avg_r) if s.avg_r is not none else '—' }}</div></div>
+  <div class="stat"><div class="lbl">Total R</div><div class="v num {{ 'up' if s.total_r > 0 else ('down' if s.total_r < 0 else 'flat') }}">{{ '%+.1f'|format(s.total_r) }}</div><div class="s">PF {{ s.pf if s.pf is not none else '—' }}</div></div>
+</div>
+
+<section>
+{% if rows %}
+<div class="scroll"><table>
+  <thead><tr>
+    <th>Time</th><th class="l">Symbol</th><th class="l">Side</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th>
+    <th>Box</th><th>Bars</th><th>Vol&times;</th><th>ADX</th><th>RSI</th><th class="l">Status</th><th>R</th><th>Best R</th><th class="l">Why live said no</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td class="num">{{ r.timestamp.strftime('%d-%m %H:%M') }}</td>
+    <td class="l">{{ r.symbol }}</td>
+    <td class="l"><span class="tag {{ 'up' if r.direction == 'LONG' else 'down' }}">{{ 'CALL' if r.direction == 'LONG' else 'PUT' }}</span></td>
+    <td class="num">{{ '%.2f'|format(r.entry) }}</td>
+    <td class="num">{{ '%.2f'|format(r.sl) }}</td>
+    <td class="num">{{ '%.2f'|format(r.tp1) }}</td>
+    <td class="num">{{ '%.2f'|format(r.tp2) }}</td>
+    <td class="num">{{ '%.2f'|format(r.tp3) }}</td>
+    <td class="num">{% if r.range_low %}{{ '%.1f'|format(r.range_low) }}–{{ '%.1f'|format(r.range_high) }}{% else %}—{% endif %}</td>
+    <td class="num">{{ r.coil_bars or '—' }}</td>
+    <td class="num">{{ '%.1f'|format(r.vol_ratio) if r.vol_ratio is not none else '—' }}</td>
+    <td class="num">{{ '%.0f'|format(r.adx_value) if r.adx_value is not none else '—' }}</td>
+    <td class="num">{{ '%.0f'|format(r.rsi_value) if r.rsi_value is not none else '—' }}</td>
+    <td class="l">{{ r.outcome or '' }}{% if r.status == 'OPEN' %} <span class="lbl">open</span>{% endif %}</td>
+    <td class="num {{ 'up' if (r.r_multiple or 0) > 0 else ('down' if (r.r_multiple or 0) < 0 else 'flat') }}">{{ '%+.2f'|format(r.r_multiple) if r.r_multiple is not none else '—' }}</td>
+    <td class="num">{{ '%+.2f'|format(r.mfe_r) if r.mfe_r is not none else '—' }}</td>
+    <td class="l" style="color:var(--muted)">{{ (r.live_reason or '')[:60] }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<div class="empty">No watch-only signals yet. They appear here as the scanner finds box breakouts that the live rules skip.</div>
+{% endif %}
+</section>
+<footer>Updated {{ now }}</footer>
+</body>
+</html>

@@ -114,21 +114,28 @@ class SymbolBacktest:
 
     # ---------------- candidate pre-filter (vectorised) ---------------- #
     def _candidates(self) -> List[int]:
-        from indicators import bars_since, detect_squeeze, squeeze_range
+        """
+        5-minute bars that close outside the range of a fresh coil, for every
+        detector switched on by SQUEEZE_DETECTOR. Both detectors are causal
+        (rolling windows over past bars only), so the full-series result at
+        bar j equals what the live scanner computes from the bars up to j.
+        """
+        from indicators import compression_setups, squeeze_range
         cfg = self.cfg
         if len(self.q15) < cfg.BB_LENGTH + cfg.MIN_SQUEEZE_BARS + 5:
             return []
-        in_sqz, dur, fired = detect_squeeze(self.q15, cfg.BB_LENGTH, cfg.BB_MULT,
-                                            cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS)
-        in_sqz, dur, fired = in_sqz.values, dur.values, fired.values
-        last_fire = -10 ** 9
-        fresh = np.zeros(len(self.q15), dtype=bool)
-        for j in range(len(self.q15)):
-            if fired[j]:
-                last_fire = j
-            live = in_sqz[j] and dur[j] >= cfg.MIN_SQUEEZE_BARS
-            fresh[j] = live or (j - last_fire) <= cfg.MAX_BARS_SINCE_FIRE
-        self._fresh = fresh
+        dets = []
+        for name, in_s, dur_s, fired_s in compression_setups(self.q15, cfg):
+            in_sqz, dur, fired = in_s.values, dur_s.values, fired_s.values
+            last_fire = -10 ** 9
+            fresh = np.zeros(len(self.q15), dtype=bool)
+            for j in range(len(self.q15)):
+                if fired[j]:
+                    last_fire = j
+                live = in_sqz[j] and dur[j] >= cfg.MIN_SQUEEZE_BARS
+                fresh[j] = live or (j - last_fire) <= cfg.MAX_BARS_SINCE_FIRE
+            dets.append((name, fresh, in_s.reset_index(drop=True), dur_s.reset_index(drop=True)))
+        q = self.q15.reset_index(drop=True)
 
         # Last completed 15-minute bar for every 5-minute bar close.
         jidx = np.searchsorted(self.q15_done, self.bar_close, side="right") - 1
@@ -139,21 +146,22 @@ class SymbolBacktest:
         stamps = pd.to_datetime(self.d5["timestamp"])
         for i in range(len(self.d5) - 1):
             j = jidx[i]
-            if j < 0 or not fresh[j]:
+            if j < 0:
                 continue
             close_t = (stamps.iloc[i] + pd.Timedelta(minutes=5)).time()
             if not (self.sig_start <= close_t <= self.sig_end):
                 continue
-            if j not in rng:
-                sub = self.q15.iloc[:j + 1]
-                s_in, s_dur, _ = detect_squeeze(sub.tail(200), cfg.BB_LENGTH, cfg.BB_MULT,
-                                                cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS)
-                rng[j] = squeeze_range(sub.tail(200).reset_index(drop=True),
-                                       s_in.reset_index(drop=True), s_dur.reset_index(drop=True),
-                                       cfg.SQUEEZE_RANGE_MAX_BARS)
-            hi, lo = rng[j]
-            if closes[i] > hi or closes[i] < lo:
-                out.append(i)
+            for name, fresh, in_s, dur_s in dets:
+                if not fresh[j]:
+                    continue
+                key = (name, j)
+                if key not in rng:
+                    rng[key] = squeeze_range(q.iloc[:j + 1], in_s.iloc[:j + 1], dur_s.iloc[:j + 1],
+                                             cfg.SQUEEZE_RANGE_MAX_BARS)
+                hi, lo = rng[key]
+                if closes[i] > hi or closes[i] < lo:
+                    out.append(i)
+                    break
         return out
 
     # ---------------- opening-volume baseline ---------------- #
@@ -178,7 +186,8 @@ class SymbolBacktest:
         c = self.cfg
         return (c.volume_mult(self.symbol), c.adx_threshold(self.symbol), c.min_composite(self.symbol),
                 c.RSI_EXHAUSTION_FILTER, c.GAP_FILTER, c.OPEN_VOLUME_BASELINE,
-                c.TRADING_MODE)
+                c.TRADING_MODE, getattr(c, "SQUEEZE_DETECTOR", "ttm"),
+                getattr(c, "BOX_MAX_WIDTH_ATR", None), getattr(c, "BOX_ATR_BARS", None))
 
     def _evaluate(self, i: int) -> Optional[Dict]:
         key = (i, self._filter_signature())
@@ -196,7 +205,14 @@ class SymbolBacktest:
         window = self.d5.iloc[max(0, i - cfg.SQUEEZE_HISTORY_BARS + 1):i + 1].reset_index(drop=True)
         j = self._jidx[i]
         sqz_df = self.q15.iloc[max(0, j - 199):j + 1].reset_index(drop=True)
-        htf = self.store.resample(window, cfg.HTF_TIMEFRAME)      # live: includes forming bar
+        # The resamples don't depend on the variant being tested - share them
+        # across variants through the per-symbol cache.
+        ctx = self.eval_cache.get(("ctx", i))
+        if ctx is None:
+            ctx = {"htf": self.store.resample(window, cfg.HTF_TIMEFRAME),   # live: includes forming bar
+                   "hourly": self.store.resample(window, cfg.POS_SL_ATR_TIMEFRAME)}
+            self.eval_cache[("ctx", i)] = ctx
+        htf = ctx["htf"]
         res = self.filters.apply_all(window, htf=htf, oi={"change_pct": 0.0},
                                      symbol=self.symbol, sqz_df=sqz_df,
                                      vol_baseline=self._baseline(i))
@@ -210,7 +226,7 @@ class SymbolBacktest:
         if atr_val <= 0:
             return None
         atr_htf = float(atr(htf, cfg.ATR_LENGTH).iloc[-1]) if len(htf) >= cfg.ATR_LENGTH + 2 else None
-        hourly = self.store.resample(window, cfg.POS_SL_ATR_TIMEFRAME)
+        hourly = ctx["hourly"]
         atr_pos = float(atr(hourly, cfg.ATR_LENGTH).iloc[-1]) if len(hourly) >= cfg.ATR_LENGTH + 2 else None
 
         bar_close = float(window["close"].iloc[-1])
@@ -235,6 +251,7 @@ class SymbolBacktest:
             "signal_bar": str(self.d5["timestamp"].iloc[i]), "i": i,
             "entry_time": str(self.d5["timestamp"].iloc[i + 1]), "entry": entry,
             "risk": dist, "sl_basis": basis.split(" (")[0], "risk_pct": dist / entry * 100,
+            "setup": m.get("setup", "ttm"),
             "composite": res.scores.get("composite"), "adx": m.get("adx_value"),
             "rsi": m.get("rsi_value"), "vol_ratio": m.get("vol_ratio"),
             "squeeze_bars": m.get("squeeze_bars"), "in_squeeze": m.get("in_squeeze"),
@@ -411,6 +428,7 @@ def report(trades: List[Dict], label: str, notes: Dict) -> Dict:
         "by_month": breakdown(df, "month"),
         "by_half": breakdown(df, "half"),
         "by_direction": breakdown(df, "direction"),
+        "by_setup": breakdown(df, "setup") if "setup" in df else None,
         "by_asset": breakdown(df, "asset"),
         "by_exit": breakdown(df, "exit_reason"),
         "by_adx": breakdown(df, "adx", [0, 25, 30, 40, 100], ["<25", "25-30", "30-40", "40+"]),
@@ -439,6 +457,18 @@ def save_trades(engine, trades: List[Dict], run_id: str, label: str) -> None:
     df.insert(0, "run_id", run_id)
     df.insert(1, "label", label)
     df["created_at"] = datetime.utcnow()
+    # New result fields (e.g. "setup") need their column on an existing table.
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    if insp.has_table("backtest_trades"):
+        have = {c["name"] for c in insp.get_columns("backtest_trades")}
+        with engine.begin() as conn:
+            for col in df.columns:
+                if col not in have:
+                    kind = "DOUBLE PRECISION" if pd.api.types.is_float_dtype(df[col]) else "TEXT"
+                    if pd.api.types.is_bool_dtype(df[col]):
+                        kind = "BOOLEAN"
+                    conn.execute(text(f'ALTER TABLE backtest_trades ADD COLUMN "{col}" {kind}'))
     df.to_sql("backtest_trades", engine, if_exists="append", index=False, chunksize=2000)
 
 
@@ -447,6 +477,18 @@ def save_trades(engine, trades: List[Dict], run_id: str, label: str) -> None:
 # loaded config for that variant only. BT_* flags exist only in the backtest.
 PRESETS = {
     "base": [("live-rules", {})],
+    # 26-Oct ATHERENERG: a flat afternoon coil after a trending morning that
+    # Bollinger-inside-Keltner never registered. Does a tight-range box setup
+    # add winners, or just more signals?
+    "box": [
+        ("live-rules", {}),
+        ("either-1.5", {"SQUEEZE_DETECTOR": "either", "BOX_MAX_WIDTH_ATR": 1.5}),
+        ("either-2.0", {"SQUEEZE_DETECTOR": "either", "BOX_MAX_WIDTH_ATR": 2.0}),
+        ("either-2.5", {"SQUEEZE_DETECTOR": "either", "BOX_MAX_WIDTH_ATR": 2.5}),
+        ("live-no-rsi-cap", {"RSI_EXHAUSTION_FILTER": False}),
+        ("either-2.0-no-rsi-cap", {"SQUEEZE_DETECTOR": "either", "BOX_MAX_WIDTH_ATR": 2.0,
+                                   "RSI_EXHAUSTION_FILTER": False}),
+    ],
     "oct25": [
         ("live-rules", {}),
         ("eod-exit", {"BT_EXIT_EOD": True}),
@@ -541,6 +583,8 @@ def main(argv=None) -> int:
             comparison[name] = {"changes": {k: str(v) for k, v in changes.items()},
                                 "all": r["overall"], "stocks_only": stats([t["r"] for t in eq]),
                                 "by_half": r.get("by_half"), "by_exit": r.get("by_exit"),
+                                "by_setup": r.get("by_setup"),
+                                "by_direction": r.get("by_direction"),
                                 "tp1_hit%": r.get("tp1_hit%")}
             if not args.no_save:
                 try:

@@ -13,11 +13,12 @@ from typing import Dict, List, Optional
 
 from clock import MarketClock, now_naive, today_start
 from config import cfg
+import watch
 from database import IndexSnapshot, OISnapshot, ScanLog, Signal, session_scope
 from feed_base import MarketFeed
 from feed_ws import _floor_to_bar
 from filters import FilterEngine
-from indicators import atr, bars_since, daily_change_pct, detect_squeeze
+from indicators import atr, bars_since, compression_setups, daily_change_pct
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,11 @@ class IndexScanner:
 
         if self.budget:
             self.budget.notify_if_exhausted()
+        if watch.enabled():
+            try:
+                watch.update_outcomes()
+            except Exception as exc:
+                logger.warning("[Watch] Outcome update failed: %s", exc)
         return created
 
     # ------------------------------------------------------------------ #
@@ -168,6 +174,8 @@ class IndexScanner:
 
         if not result.passed:
             logger.debug("[Scanner] %s rejected: %s", symbol, result.reason)
+            if watch.enabled():
+                self._watch(symbol, df, htf, oi, sqz_df, vol_baseline, timeframe, result.reason)
             return None
 
         blocked = self._cooldown_reason(symbol, result.direction)
@@ -246,6 +254,54 @@ class IndexScanner:
             "bar_time": latest["timestamp"],
             "timestamp": now_naive(),
         }
+
+    # ------------------------------------------------------------------ #
+    def _watch(self, symbol, df, htf, oi, sqz_df, vol_baseline, timeframe, live_reason) -> None:
+        """
+        Watch-only setup (cfg.WATCH_DETECTOR): same checks, different coil.
+        Synchronous on purpose - the detector swap must not span an await.
+        Never raises into the live scan.
+        """
+        try:
+            hybrid = sqz_df is not None
+            with watch.watched_rules():
+                if not self._worth_a_second_look(sqz_df if hybrid else df, hybrid):
+                    return
+                oi_w = oi if oi is not None else (
+                    self._oi_from_candles(df) if cfg.USE_OI_FILTER else None)
+                vb = vol_baseline
+                if vb is None and cfg.OPEN_VOLUME_BASELINE:
+                    vb = self._opening_volume_baseline(symbol, timeframe, df.iloc[-1]["timestamp"])
+                res = self.filters.apply_all(df, htf=htf, oi=oi_w, symbol=symbol,
+                                             sqz_df=sqz_df, vol_baseline=vb)
+            if not res.passed or watch.already_watching(symbol, res.direction):
+                return
+            atr_val = float(atr(df, cfg.ATR_LENGTH).iloc[-1])
+            if atr_val <= 0 or not self.engine:
+                return
+            atr_htf = atr_pos = None
+            if htf is not None and len(htf) >= cfg.ATR_LENGTH + 2:
+                atr_htf = float(atr(htf, cfg.ATR_LENGTH).iloc[-1])
+            if cfg.is_positional and self.store:
+                hourly = self.store.resample(df, cfg.POS_SL_ATR_TIMEFRAME)
+                if len(hourly) >= cfg.ATR_LENGTH + 2:
+                    atr_pos = float(atr(hourly, cfg.ATR_LENGTH).iloc[-1])
+            lot = 0
+            try:
+                lot = int(self.feed.lot_size(symbol) or 0)
+            except Exception:
+                lot = 0
+            setup = {"symbol": symbol, "direction": res.direction,
+                     "entry": float(df.iloc[-1]["close"]), "atr": atr_val,
+                     "atr_htf": atr_htf, "atr_pos": atr_pos, "lot_size": lot,
+                     "squeeze_high": res.meta.get("squeeze_high"),
+                     "squeeze_low": res.meta.get("squeeze_low"),
+                     "bar_high": res.meta.get("bar_high"), "bar_low": res.meta.get("bar_low")}
+            levels = self.engine.calculate_levels(setup)
+            if levels:
+                watch.record(symbol, res, levels, df.iloc[-1]["timestamp"], live_reason)
+        except Exception as exc:
+            logger.warning("[Watch] %s skipped: %s", symbol, exc)
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -373,11 +429,12 @@ class IndexScanner:
         if df is None or df.empty:
             return False
         try:
-            in_sqz, dur, fired = detect_squeeze(df, cfg.BB_LENGTH, cfg.BB_MULT,
-                                                cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS)
-            if hybrid and bool(in_sqz.iloc[-1]) and int(dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS:
-                return True
-            return bars_since(fired) <= cfg.MAX_BARS_SINCE_FIRE
+            for _name, in_sqz, dur, fired in compression_setups(df, cfg):
+                if hybrid and bool(in_sqz.iloc[-1]) and int(dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS:
+                    return True
+                if bars_since(fired) <= cfg.MAX_BARS_SINCE_FIRE:
+                    return True
+            return False
         except Exception:
             return True   # when in doubt, do the full check
 
