@@ -323,6 +323,15 @@ class WatchSignal(Base):
     checked_at = Column(DateTime)
 
 
+class SectorMap(Base):
+    """NSE industry per symbol (sectors.py), for the per-sector position cap."""
+    __tablename__ = "sector_map"
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String, index=True)
+    industry = Column(String)
+    updated_at = Column(DateTime, default=now_naive)
+
+
 class ScripMapping(Base):
     __tablename__ = "scrip_mappings"
     id = Column(Integer, primary_key=True)

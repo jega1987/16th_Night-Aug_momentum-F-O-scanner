@@ -332,6 +332,9 @@ async def main() -> int:
     feed.stream = fake
     bb_live = fake.builders["NIFTY 50"]
     t0 = hist["timestamp"].iloc[-1] + _td2(minutes=5)
+    # Live bars must sit inside the session: the store drops 15:30+ prints.
+    if (t0.hour, t0.minute) >= (15, 30) or (t0.hour, t0.minute) < (9, 15):
+        t0 = (t0 + _td2(days=1 if t0.hour >= 15 else 0)).replace(hour=9, minute=15, second=0)
     for i, (px, vol) in enumerate([(99000, 100), (99050, 300), (99020, 600), (99100, 900)]):
         bb_live.add_tick(px, vol, t0 + _td2(minutes=i))
     calls_before = probe_store.api_calls_made

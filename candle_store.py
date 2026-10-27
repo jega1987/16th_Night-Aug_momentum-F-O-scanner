@@ -40,6 +40,25 @@ BARS_PER_SESSION = {"1m": 375, "3m": 125, "5m": 75, "10m": 38,
 TF_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "60m": 60}
 
 
+SESSION_OPEN = (9, 15)
+SESSION_CLOSE = (15, 30)
+
+
+def session_only(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """
+    Drop bars stamped outside 09:15-15:29 IST. The stream keeps ticking in the
+    15:30-15:40 closing session, which left 15:30/15:35 "candles" in the store;
+    they are not tradable prices and bent the next morning's indicators.
+    """
+    if df is None or df.empty or "timestamp" not in df:
+        return df
+    ts = pd.to_datetime(df["timestamp"])
+    minutes = ts.dt.hour * 60 + ts.dt.minute
+    keep = (minutes >= SESSION_OPEN[0] * 60 + SESSION_OPEN[1]) & \
+           (minutes < SESSION_CLOSE[0] * 60 + SESSION_CLOSE[1])
+    return df[keep].reset_index(drop=True) if not keep.all() else df
+
+
 class CandleStore:
     def __init__(self, feed):
         self.feed = feed
@@ -49,6 +68,11 @@ class CandleStore:
     # ------------------------------------------------------------------ #
     async def get(self, symbol: str, timeframe: str, bars: int,
                   use_futures: bool = True) -> pd.DataFrame:
+        """Session bars only (see session_only); otherwise as _get."""
+        return session_only(await self._get(symbol, timeframe, bars, use_futures))
+
+    async def _get(self, symbol: str, timeframe: str, bars: int,
+                   use_futures: bool = True) -> pd.DataFrame:
         """
         Best available series: stored history, the REST gap if needed, and live
         streamed bars spliced on top.
@@ -157,6 +181,7 @@ class CandleStore:
         wipes that symbol/timeframe and rewrites it fresh: candles are a cache
         of exchange data, so discarding and refetching is always safe.
         """
+        df = session_only(df)
         if df is None or df.empty:
             return 0
         df = df.copy()
