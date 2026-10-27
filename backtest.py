@@ -417,8 +417,7 @@ class SymbolBacktest:
         cfg = self.cfg
         want = 1 if t["direction"] == "LONG" else -1
         close_ts = self.bar_close[i]
-        if MARKET is not None and (getattr(cfg, "BT_MKT_FILTER", False)
-                                   or getattr(cfg, "BT_DAY_FILTER", False)):
+        if MARKET is not None:
             m = MARKET.at(close_ts)
             t["mkt_trend"], t["mkt_adx"], t["mkt_day"] = m["trend"], round(m["adx"], 1), m["day"]
             if getattr(cfg, "BT_MKT_FILTER", False):
@@ -427,7 +426,7 @@ class SymbolBacktest:
             if getattr(cfg, "BT_DAY_FILTER", False) and m["day"] != want:
                 return "market filter (NIFTY vs day open)"
         vmin, vmax = getattr(cfg, "BT_VIX_PCT_MIN", None), getattr(cfg, "BT_VIX_PCT_MAX", None)
-        if VIX is not None and (vmin is not None or vmax is not None):
+        if VIX is not None:
             p = VIX.pct(pd.Timestamp(close_ts).date())
             t["vix_pct"] = None if p is None else round(p, 1)
             if p is not None and ((vmin is not None and p < vmin) or (vmax is not None and p > vmax)):
