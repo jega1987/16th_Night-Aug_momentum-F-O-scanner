@@ -54,7 +54,8 @@ def _contract(feed: KiteFeed, symbol: str, expiry: date, opt_type: str, strike: 
 
 
 def _minutes(feed: KiteFeed, token: int, start: datetime) -> pd.DataFrame:
-    rows = feed.kite.historical_data(token, start - timedelta(minutes=10), now_naive(),
+    day_open = start.replace(hour=9, minute=15, second=0, microsecond=0)
+    rows = feed.kite.historical_data(token, day_open, now_naive(),
                                      "minute", oi=True)
     df = pd.DataFrame(rows)
     if df.empty:
@@ -64,9 +65,17 @@ def _minutes(feed: KiteFeed, token: int, start: datetime) -> pd.DataFrame:
 
 
 def _at(df: pd.DataFrame, ts, col: str = "close") -> Optional[float]:
-    """Close of the last minute bar that started at or before ts."""
-    sub = df[df["timestamp"] <= pd.Timestamp(ts)]
-    return float(sub[col].iloc[-1]) if len(sub) else None
+    """
+    Close of the last minute bar at or before ts, from the same session. A thin
+    contract may not trade for a while; then the first bar in the 15 minutes
+    after ts is used instead.
+    """
+    t = pd.Timestamp(ts)
+    sub = df[(df["timestamp"] <= t) & (df["timestamp"].dt.date == t.date())]
+    if len(sub):
+        return float(sub[col].iloc[-1])
+    after = df[(df["timestamp"] > t) & (df["timestamp"] <= t + pd.Timedelta(minutes=15))]
+    return float(after[col].iloc[0]) if len(after) else None
 
 
 def _first_reach(fut: pd.DataFrame, after, level: float, long_side: bool):
