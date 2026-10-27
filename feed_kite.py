@@ -485,6 +485,22 @@ class KiteFeed(MarketFeed):
         return [{"date": d, "epoch_ms": int(datetime.combine(d, datetime.min.time()).timestamp() * 1000)}
                 for d in sorted(seen)]
 
+    async def get_strikes(self, symbol: str, expiry: Dict, opt_type: str) -> List[float]:
+        """Listed strikes for one expiry and option type, from the instruments dump."""
+        self._require_connection()
+        root = INDEX_LOOKUP.get(symbol, {}).get("root", symbol).upper()
+        want_expiry = expiry.get("date")
+        want_type = str(opt_type).upper()
+        out = set()
+        for exchange in ("NFO", "BFO"):
+            for row in self._instruments.get(exchange, []):
+                if (str(row.get("instrument_type", "")).upper() == want_type
+                        and str(row.get("name", "")).upper() == root
+                        and _as_date(row.get("expiry")) == want_expiry
+                        and row.get("strike")):
+                    out.add(float(row["strike"]))
+        return sorted(out)
+
     async def get_option_quote(self, symbol: str, expiry: Dict, strike: int,
                                opt_type: str) -> Optional[Dict]:
         """

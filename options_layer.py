@@ -205,6 +205,19 @@ class OptionsLayer:
                                      "No tradable expiry found")
 
         plan.expiry = chosen["date"].isoformat()
+
+        # Snap to a strike that is actually listed. A fixed step (50 by
+        # default) invents contracts for stocks listed at 2.5/5/10/20 steps -
+        # ICICIGI 1550 PE, ONGC 250 PE for a 225 stock - and those get no quote.
+        try:
+            listed = await self.feed.get_strikes(symbol, chosen, plan.option_type)
+        except Exception as exc:
+            logger.warning("[Options] Strike list unavailable for %s: %s", symbol, exc)
+            listed = []
+        snapped = nearest_listed_strike(futures_price, listed)
+        if snapped and snapped != plan.strike:
+            plan.notes.append(f"Strike {plan.strike} not listed - using {snapped}")
+            plan.strike = snapped
         plan.dte = (chosen["date"] - now_naive().date()).days
         if chosen.get("rolled"):
             plan.notes.append("Rolled to the next expiry - today's contract is past the theta cutoff")
@@ -458,3 +471,16 @@ class OptionsLayer:
 
 # Imported late to keep the indicator module free of option concerns.
 from indicators import atm_strike  # noqa: E402
+
+
+def nearest_listed_strike(price: float, listed) -> Optional[int]:
+    """
+    The listed strike closest to the price (the ATM contract). Only whole-rupee
+    strikes are considered, because strikes are stored as integers; stocks
+    with half-rupee strikes (ONGC 227.5) still have whole ones every 5.
+    Ties go to the lower strike. None when nothing is listed.
+    """
+    pool = [float(k) for k in (listed or []) if abs(float(k) - round(float(k))) < 1e-6]
+    if not pool or not price:
+        return None
+    return int(round(min(pool, key=lambda k: (abs(k - price), k))))
