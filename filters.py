@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
-from indicators import (adx, atr, bars_since, detect_squeeze, ema, rsi,
+from indicators import (adx, atr, bars_since, compression_setups, ema, rsi,
                         squeeze_range, squeeze_start_timestamp, swing_points)
 
 
@@ -64,17 +64,28 @@ class FilterEngine:
             res.reason = f"Not enough {cfg.SQUEEZE_TIMEFRAME} candles for the squeeze ({len(sqz_df)})"
             return res
         base = sqz_df if hybrid else df
-        in_sqz, sqz_dur, fired = detect_squeeze(
-            base, cfg.BB_LENGTH, cfg.BB_MULT, cfg.KC_LENGTH, cfg.KC_MULT, cfg.MIN_SQUEEZE_BARS
-        )
-        since_fire = bars_since(fired)
+        # One or more coil detectors (cfg.SQUEEZE_DETECTOR). The first one
+        # whose coil is fresh - recently released, or still on and old enough
+        # in hybrid mode - supplies the range; otherwise the first is reported.
+        chosen = None
+        for name, in_sqz, sqz_dur, fired in compression_setups(base, cfg):
+            since_fire = bars_since(fired)
+            # Hybrid: a coil that is still on counts once it is old enough -
+            # the 5-minute close breaking its range IS the release, often a
+            # bar or two before the 15-minute bands confirm it.
+            live_coil = bool(hybrid and in_sqz.iloc[-1]
+                             and int(sqz_dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS)
+            cand = (name, in_sqz, sqz_dur, since_fire, live_coil)
+            if chosen is None:
+                chosen = cand
+            if since_fire <= cfg.MAX_BARS_SINCE_FIRE or live_coil:
+                chosen = cand
+                break
+        setup, in_sqz, sqz_dur, since_fire, live_coil = chosen
         hi, lo = squeeze_range(base, in_sqz, sqz_dur, cfg.SQUEEZE_RANGE_MAX_BARS)
-        # Hybrid: a coil that is still on counts once it is old enough - the
-        # 5-minute close breaking its range IS the release, often a bar or two
-        # before the 15-minute bands confirm it.
-        live_coil = bool(hybrid and in_sqz.iloc[-1] and int(sqz_dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS)
 
         res.meta.update({
+            "setup": setup,
             "squeeze_tf": cfg.SQUEEZE_TIMEFRAME if hybrid else cfg.TIMEFRAME,
             "in_squeeze": bool(in_sqz.iloc[-1]),
             "squeeze_bars": int(sqz_dur.iloc[-1]),
