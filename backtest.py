@@ -93,6 +93,39 @@ def list_symbols(engine) -> List[str]:
 
 
 # --------------------------------------------------------------------------- #
+class MarketState:
+    """
+    NIFTY 50 context at any 5-minute bar close, causal:
+      trend - +1/-1: last completed 15m close above/below its 20-EMA
+      adx   - 15m ADX(14) of that bar
+      day   - +1/-1/0: last 5m close vs today's open
+    Used by the BT_MKT_FILTER / BT_DAY_FILTER experiments.
+    """
+
+    def __init__(self, d5: pd.DataFrame, store):
+        from indicators import adx, ema
+        d5 = d5.reset_index(drop=True)
+        q = store.resample(d5, "15m").reset_index(drop=True)
+        self.q_done = (pd.to_datetime(q["timestamp"]) + pd.Timedelta(minutes=15)).values
+        self.q_trend = np.sign(q["close"].values - ema(q["close"], 20).values)
+        self.q_adx = adx(q, 14).values
+        ts = pd.to_datetime(d5["timestamp"])
+        self.b_done = (ts + pd.Timedelta(minutes=5)).values
+        self.b_close = d5["close"].values
+        day_open = d5.groupby(ts.dt.date)["open"].transform("first").values
+        self.b_day = np.sign(self.b_close - day_open)
+
+    def at(self, close_ts) -> Dict:
+        j = np.searchsorted(self.q_done, close_ts, side="right") - 1
+        k = np.searchsorted(self.b_done, close_ts, side="right") - 1
+        return {"trend": int(self.q_trend[j]) if j >= 0 else 0,
+                "adx": float(self.q_adx[j]) if j >= 0 else 0.0,
+                "day": int(self.b_day[k]) if k >= 0 else 0}
+
+
+MARKET: Optional[MarketState] = None
+
+
 class SymbolBacktest:
     """Signals and simulated trades for one symbol."""
 
@@ -354,6 +387,29 @@ class SymbolBacktest:
         })
         return t
 
+    def _gate(self, i: int, t: Dict) -> Optional[str]:
+        """Experimental entry gates (BT_* flags); None = allowed."""
+        cfg = self.cfg
+        want = 1 if t["direction"] == "LONG" else -1
+        close_ts = self.bar_close[i]
+        if MARKET is not None and (getattr(cfg, "BT_MKT_FILTER", False)
+                                   or getattr(cfg, "BT_DAY_FILTER", False)):
+            m = MARKET.at(close_ts)
+            t["mkt_trend"], t["mkt_adx"], t["mkt_day"] = m["trend"], round(m["adx"], 1), m["day"]
+            if getattr(cfg, "BT_MKT_FILTER", False):
+                if m["trend"] != want or m["adx"] <= (getattr(cfg, "BT_MKT_ADX", 20.0) or 20.0):
+                    return "market filter (NIFTY trend/ADX)"
+            if getattr(cfg, "BT_DAY_FILTER", False) and m["day"] != want:
+                return "market filter (NIFTY vs day open)"
+        if getattr(cfg, "BT_ST_ALIGN", False) and len(self.q15) > cfg.ST_PERIOD + 2:
+            if not hasattr(self, "_st_dir"):
+                from indicators import supertrend
+                self._st_dir = supertrend(self.q15, cfg.ST_PERIOD, cfg.ST_MULT)[1].values
+            j = self._jidx[i]
+            if j >= 0 and int(self._st_dir[j]) != want:
+                return "Supertrend against entry"
+        return None
+
     def run(self) -> List[Dict]:
         cands = self._candidates()
         busy_until = -1
@@ -364,6 +420,10 @@ class SymbolBacktest:
                 continue
             t = self._evaluate(i)
             if not t:
+                continue
+            why = self._gate(i, t)
+            if why:
+                self.rejects[why] = self.rejects.get(why, 0) + 1
                 continue
             t = self._simulate(t)
             self.trades.append(t)
@@ -377,6 +437,9 @@ def apply_portfolio_caps(trades: List[Dict], max_per_day: int, max_open: int) ->
     """Time order; within one scan, highest composite first."""
     trades = sorted(trades, key=lambda t: (t["signal_bar"], -(t["composite"] or 0)))
     taken, open_exits, per_day = [], [], {}
+    from config import cfg as _cfg
+    cluster_n = int(getattr(_cfg, "BT_CLUSTER_MAX", 0) or 0)
+    cluster_win = pd.Timedelta(minutes=int(getattr(_cfg, "BT_CLUSTER_MINUTES", 30) or 30))
     for t in trades:
         now = t["entry_time"]
         open_exits = [e for e in open_exits if e > now]
@@ -385,6 +448,12 @@ def apply_portfolio_caps(trades: List[Dict], max_per_day: int, max_open: int) ->
             continue
         if max_open and len(open_exits) >= max_open:
             continue
+        if cluster_n:
+            now_ts = pd.Timestamp(now)
+            near = sum(1 for x in taken if x["direction"] == t["direction"]
+                       and now_ts - pd.Timestamp(x["entry_time"]) <= cluster_win)
+            if near >= cluster_n:
+                continue
         per_day[day] = per_day.get(day, 0) + 1
         open_exits.append(t["exit_time"])
         taken.append(t)
@@ -477,6 +546,20 @@ def save_trades(engine, trades: List[Dict], run_id: str, label: str) -> None:
 # loaded config for that variant only. BT_* flags exist only in the backtest.
 PRESETS = {
     "base": [("live-rules", {})],
+    # 27-Oct review: trend day (+) vs range day (-). Market-context gates,
+    # Supertrend agreement at entry, same-direction clustering, late entries.
+    "regime": [
+        ("live-rules", {}),
+        ("nifty-trend-adx20", {"BT_MKT_FILTER": True, "BT_MKT_ADX": 20.0}),
+        ("nifty-vs-day-open", {"BT_DAY_FILTER": True}),
+        ("supertrend-agrees", {"BT_ST_ALIGN": True}),
+        ("cluster-max2-30min", {"BT_CLUSTER_MAX": 2, "BT_CLUSTER_MINUTES": 30}),
+        ("no-entry-after-1430", {"SIGNAL_END_TIME": "14:30"}),
+        ("combo-trend+st+cluster", {"BT_MKT_FILTER": True, "BT_MKT_ADX": 20.0, "BT_ST_ALIGN": True,
+                                    "BT_CLUSTER_MAX": 2, "BT_CLUSTER_MINUTES": 30}),
+        ("combo-day+st+cluster", {"BT_DAY_FILTER": True, "BT_ST_ALIGN": True,
+                                  "BT_CLUSTER_MAX": 2, "BT_CLUSTER_MINUTES": 30}),
+    ],
     # 26-Oct ATHERENERG: a flat afternoon coil after a trending morning that
     # Bollinger-inside-Keltner never registered. Does a tight-range box setup
     # add winners, or just more signals?
@@ -533,6 +616,14 @@ def main(argv=None) -> int:
         logger.warning("SQUEEZE_TIMEFRAME=%s - this backtest models the 15m hybrid mode",
                        cfg.SQUEEZE_TIMEFRAME)
     filters = FilterEngine(cfg)
+    global MARKET
+    try:
+        nifty = load_series(engine, "NIFTY 50", "5m", args.days)
+        if len(nifty) > 100:
+            MARKET = MarketState(nifty, CandleStore.__new__(CandleStore))
+            logger.info("Market context: NIFTY 50, %d bars", len(nifty))
+    except Exception as exc:
+        logger.warning("Market context unavailable: %s", exc)
     store = CandleStore.__new__(CandleStore)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()] or list_symbols(engine)
     logger.info("Backtest '%s': %d symbols, %d days | mode=%s squeeze=%s ADX eq>%s idx>%s "
