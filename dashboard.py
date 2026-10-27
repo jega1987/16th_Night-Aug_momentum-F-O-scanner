@@ -355,6 +355,23 @@ async def pnl_page(request: Request,
     return templates.TemplateResponse(request, "pnl.html", ctx)
 
 
+@app.get("/watch")
+async def watch_page(request: Request, days: int = Query(default=60, ge=1, le=365),
+                     token: Optional[str] = Query(default=None), _=Depends(require_token)):
+    """Watch-only setups (never traded) and how they would have done."""
+    import watch
+    try:
+        watch.update_outcomes()
+    except Exception as exc:
+        logger.warning("[Watch] Outcome update failed: %s", exc)
+    data = watch.report(days)
+    ctx = {"token": token or "", "now": now_naive().strftime("%d %b %Y, %H:%M IST"),
+           "summary": data["summary"], "rows": data["rows"], "days": days,
+           "enabled": watch.enabled(), "width": cfg.WATCH_BOX_WIDTH_ATR,
+           "min_bars": cfg.MIN_SQUEEZE_BARS, "hold": cfg.POS_MAX_HOLD_DAYS}
+    return templates.TemplateResponse(request, "watch.html", ctx)
+
+
 @app.get("/api/pnl")
 async def api_pnl(period: str = Query(default="month"), date_from: Optional[str] = Query(default=None),
                   date_to: Optional[str] = Query(default=None), group: str = Query(default="day"),

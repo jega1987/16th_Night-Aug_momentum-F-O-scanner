@@ -107,6 +107,11 @@ class StrategyConfig:
     # combined high-low range is at most BOX_MAX_WIDTH_ATR x the average true
     # range of the previous BOX_ATR_BARS bars (75 x 15m = about 3 sessions).
     SQUEEZE_DETECTOR: str = os.getenv("SQUEEZE_DETECTOR", "ttm").strip().lower()
+    # Watch-only setups: evaluated every scan alongside the live rules and
+    # recorded in watch_signals (dashboard /watch), never traded. "" = off,
+    # "box" = the tight-range box at WATCH_BOX_WIDTH_ATR.
+    WATCH_DETECTOR: str = os.getenv("WATCH_DETECTOR", "").strip().lower()
+    WATCH_BOX_WIDTH_ATR: float = _float("WATCH_BOX_WIDTH_ATR", 2.5)
     BOX_MAX_WIDTH_ATR: float = _float("BOX_MAX_WIDTH_ATR", 2.0)
     BOX_ATR_BARS: int = _int("BOX_ATR_BARS", 75)
 
