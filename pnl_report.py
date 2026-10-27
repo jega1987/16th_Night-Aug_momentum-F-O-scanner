@@ -207,4 +207,16 @@ def row_view(r: Signal, basis: str = "option") -> Dict:
         "stock_pnl": r.pnl, "r": r.r_multiple,
         "status": r.status, "tp1_hit": r.tp1_hit, "tp2_hit": r.tp2_hit,
         "notes": r.notes, "score": r.composite_score,
+        "why": _why(r),
     }
+
+
+def _why(r: Signal) -> Optional[str]:
+    """Plain-words reason the trade closed (analytics outcome vocabulary)."""
+    if r.status not in CLOSED:
+        return None
+    try:
+        import analytics
+        return analytics.OUTCOME_LABELS.get(analytics._classify(r))
+    except Exception:
+        return None

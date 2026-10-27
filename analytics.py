@@ -30,26 +30,36 @@ OPEN_STATES = ("OPEN", "RUNNING")
 # expectancy. TRAIL covers both "stopped at breakeven after TP1" and
 # "Supertrend flipped", so the tp1/tp2 flags disambiguate.
 OUTCOME_LABELS = {
-    "stop": "Stopped out before T1",
+    "stop": "Stopped out before T1 (full stop)",
+    "early_exit": "Trailed / Supertrend exit before T1",
+    "flip_fast": "Exited within 15 min of entry (Supertrend already against)",
     "breakeven": "T1 banked, then stopped near breakeven",
     "partial": "T2 banked, then trailed out",
     "runner": "Full run to T3",
+    "time": "Closed on the holding-period / expiry limit",
     "squareoff": "Closed at the 15:20 bell",
 }
 
 
 def _classify(sig: Signal) -> str:
+    """Why the trade ended, in plain words (see OUTCOME_LABELS)."""
+    notes = (sig.notes or "").lower()
     if sig.status == "TP3":
         return "runner"
     if sig.status == "SQUAREOFF":
+        if "holding period" in notes or "expiry" in notes:
+            return "time"
         return "squareoff"
-    if sig.status == "SL" and not sig.tp1_hit:
-        return "stop"
     if sig.tp2_hit:
         return "partial"
     if sig.tp1_hit:
         return "breakeven"
-    return "stop"
+    if sig.status == "SL":
+        return "stop"
+    # TRAIL before T1: a Supertrend flip or a tightened stop
+    if sig.exit_time and sig.timestamp and (sig.exit_time - sig.timestamp).total_seconds() <= 15 * 60:
+        return "flip_fast"
+    return "early_exit"
 
 
 def _load(days: int = None, timeframe: str = None, symbol: str = None) -> List[Signal]:
@@ -267,6 +277,69 @@ def to_csv(days: int = None, timeframe: str = None) -> str:
     return buf.getvalue()
 
 
+def _bucket(value, edges, labels):
+    if value is None:
+        return None
+    for (lo, hi), lab in zip(edges, labels):
+        if lo <= value < hi:
+            return lab
+    return None
+
+
+CHECKS = [
+    # (check, extractor(signal, factor_breakdown) -> bucket label)
+    ("ADX", lambda r, fb: _bucket(fb.get("adx_value"), [(0, 25), (25, 30), (30, 40), (40, 1e9)],
+                                 ["22-25", "25-30", "30-40", "40+"])),
+    ("RSI (CALL)", lambda r, fb: _bucket(fb.get("rsi_value"), [(0, 60), (60, 65), (65, 70), (70, 75), (75, 101)],
+                                        ["<60", "60-65", "65-70", "70-75", "75+"]) if r.direction == "LONG" else None),
+    ("RSI (PUT)", lambda r, fb: _bucket(fb.get("rsi_value"), [(0, 25), (25, 30), (30, 35), (35, 40), (40, 101)],
+                                       ["<25", "25-30", "30-35", "35-40", "40+"]) if r.direction == "SHORT" else None),
+    ("Volume x avg", lambda r, fb: _bucket(fb.get("vol_ratio"), [(0, 2), (2, 3), (3, 5), (5, 1e9)],
+                                          ["<2", "2-3", "3-5", "5+"]) if fb.get("vol_ratio") else None),
+    ("Squeeze length (15m bars)", lambda r, fb: _bucket(fb.get("squeeze_bars"), [(0, 8), (8, 12), (12, 20), (20, 1e9)],
+                                                       ["6-7 / released", "8-11", "12-19", "20+"])),
+    ("Composite score", lambda r, fb: _bucket(r.composite_score, [(0, 0.8), (0.8, 0.9), (0.9, 1.01)],
+                                             ["<0.80", "0.80-0.90", "0.90+"])),
+    ("Liquidity sweep", lambda r, fb: None if fb.get("sweep") is None else ("yes" if fb.get("sweep") >= 1 else "no")),
+    ("Market structure", lambda r, fb: None if fb.get("structure") is None else ("yes" if fb.get("structure") >= 1 else "no")),
+    ("15m trend (HTF)", lambda r, fb: None if fb.get("htf") is None else ("with" if fb.get("htf") >= 0.75 else "against/flat")),
+    ("OI buildup", lambda r, fb: None if fb.get("oi") is None else ("supportive" if fb.get("oi") >= 0.75 else
+                                                                    ("neutral" if fb.get("oi") >= 0.4 else "against"))),
+    ("Entry hour", lambda r, fb: f"{r.timestamp.hour:02d}:00" if r.timestamp else None),
+    ("Side", lambda r, fb: "CALL" if r.direction == "LONG" else "PUT"),
+    ("Asset", lambda r, fb: r.asset_class or None),
+    ("Stop basis", lambda r, fb: (fb.get("sl_basis") or "").split(" (")[0] or None),
+]
+
+
+def check_buckets(days: int = None, timeframe: str = None) -> List[Dict]:
+    """
+    Win rate and average R for each value range of each check, on closed
+    trades. Shows which settings of a check actually paid - e.g. whether
+    ADX 22-25 trades lose while 30+ win.
+    """
+    closed = [r for r in _load(days, timeframe) if r.status in CLOSED_STATES]
+    out = []
+    for name, fn in CHECKS:
+        groups: Dict[str, List[Signal]] = {}
+        for r in closed:
+            try:
+                key = fn(r, r.factor_breakdown or {})
+            except Exception:
+                key = None
+            if key is not None:
+                groups.setdefault(str(key), []).append(r)
+        for key in sorted(groups):
+            rows = groups[key]
+            wins = [x for x in rows if (x.pnl or 0) > 0]
+            r_vals = [x.r_multiple for x in rows if x.r_multiple is not None]
+            out.append({"check": name, "bucket": key, "trades": len(rows),
+                        "win_rate": round(len(wins) / len(rows) * 100, 1),
+                        "avg_r": round(sum(r_vals) / len(r_vals), 3) if r_vals else None,
+                        "pnl": round(sum(x.pnl or 0 for x in rows), 2)})
+    return out
+
+
 def full_report(days: int = None, timeframe: str = None) -> Dict:
     tf = timeframe or cfg.TIMEFRAME
     return {
@@ -276,6 +349,7 @@ def full_report(days: int = None, timeframe: str = None) -> Dict:
         "outcomes": outcome_mix(days, tf),
         "factors": factor_postmortem(days, tf),
         "score_buckets": score_buckets(days, tf),
+        "check_buckets": check_buckets(days, tf),
         "by_symbol": breakdown("symbol", days, tf),
         "by_direction": breakdown("direction", days, tf),
         "options": option_gate_summary(days, tf),

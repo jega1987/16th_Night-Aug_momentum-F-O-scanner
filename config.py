@@ -316,6 +316,10 @@ class StrategyConfig:
     MIN_IV_RANK: float = _float("MIN_IV_RANK", 20.0)
     MAX_IV_RANK: float = _float("MAX_IV_RANK", 80.0)
     IV_RANK_LOOKBACK_DAYS: int = _int("IV_RANK_LOOKBACK_DAYS", 90)
+    # ---------- data retention (retention.py, daily after the close) ----------
+    RETENTION_SCAN_DAYS: int = _int("RETENTION_SCAN_DAYS", 30)
+    RETENTION_CANDLE_DAYS: int = _int("RETENTION_CANDLE_DAYS", 90)
+    RETENTION_SIGNAL_DAYS: int = _int("RETENTION_SIGNAL_DAYS", 400)
     IV_RANK_MIN_SAMPLES: int = _int("IV_RANK_MIN_SAMPLES", 60)
     IV_RANK_MIN_DAYS: int = _int("IV_RANK_MIN_DAYS", 10)
     # Expiry-day theta gate: no new option entries after this IST time on the

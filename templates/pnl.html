@@ -186,7 +186,7 @@
         <td class="flat" colspan="7" style="text-align:center">no option prices</td>
         {% endif %}
         <td class="num {% if (r.stock_pnl or 0) > 0 %}up{% elif (r.stock_pnl or 0) < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(r.stock_pnl or 0) }}</td>
-        <td class="l">{{ r.status }}{% if r.exit_time %} <span class="flat">{{ r.exit_time }}</span>{% endif %}</td>
+        <td class="l">{{ r.status }}{% if r.exit_time %} <span class="flat">{{ r.exit_time }}</span>{% endif %}{% if r.why %}<br><span class="flat" style="font-size:11px">{{ r.why }}</span>{% endif %}</td>
         <td class="num">{{ r.lots or '—' }}</td>
       </tr>
     {% endfor %}

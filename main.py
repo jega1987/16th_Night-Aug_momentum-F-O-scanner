@@ -180,6 +180,15 @@ async def job_sample_iv():
         logger.warning("[IV] Sampling failed: %s", exc)
 
 
+async def job_retention():
+    """Daily housekeeping after the close (see retention.py)."""
+    try:
+        import retention
+        await asyncio.to_thread(retention.purge)
+    except Exception as exc:
+        logger.warning("[Retention] Failed: %s", exc)
+
+
 async def job_auto_login():
     """
     Refresh the Kite token via TOTP before the open.
@@ -307,6 +316,9 @@ def register_jobs():
     scheduler.add_job(job_build_universe,
                       CronTrigger(day_of_week="mon-fri", hour=9, minute=45, timezone=IST),
                       id="universe_refresh", replace_existing=True)
+    scheduler.add_job(job_retention,
+                      CronTrigger(day_of_week="mon-fri", hour=17, minute=30, timezone=IST),
+                      id="retention", replace_existing=True)
     scheduler.add_job(job_premarket_backfill,
                       CronTrigger(day_of_week="mon-fri", hour=8, minute=45, timezone=IST),
                       id="backfill", replace_existing=True)

@@ -167,6 +167,29 @@
 </section>
 
 <section>
+  <div class="shead"><span class="lbl">what each check is worth</span></div>
+  <p class="note">Closed trades grouped by the value each check had at entry. A range with a low win rate and negative average R over a decent number of trades is a candidate to tighten; treat ranges with fewer than ~15 trades as anecdotes.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Check</th><th>Value at entry</th><th>Trades</th><th>Win rate</th><th>Avg R</th><th>P&amp;L</th></tr></thead>
+    <tbody>
+    {% set ns = namespace(prev='') %}
+    {% for c in check_buckets %}
+      <tr>
+        <td>{% if c.check != ns.prev %}{{ c.check }}{% endif %}{% set ns.prev = c.check %}</td>
+        <td class="num" style="text-align:left">{{ c.bucket }}</td>
+        <td class="num {% if c.trades < 15 %}flat{% endif %}">{{ c.trades }}</td>
+        <td class="num">{{ '{}%'.format(c.win_rate) }}</td>
+        <td class="num {% if c.avg_r and c.avg_r > 0 %}up{% elif c.avg_r %}down{% endif %}">{{ '{:+.2f}'.format(c.avg_r) if c.avg_r is not none else '—' }}</td>
+        <td class="num {% if c.pnl > 0 %}up{% elif c.pnl < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(c.pnl) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
   <div class="shead"><span class="lbl">by symbol &amp; direction</span></div>
   <div class="scroll">
   <table>

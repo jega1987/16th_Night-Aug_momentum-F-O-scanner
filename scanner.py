@@ -18,6 +18,7 @@ from database import IndexSnapshot, OISnapshot, ScanLog, Signal, session_scope
 from feed_base import MarketFeed
 from feed_ws import _floor_to_bar
 from filters import FilterEngine
+from candle_store import session_only
 from indicators import atr, bars_since, compression_setups, daily_change_pct
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ class IndexScanner:
         # Only closed candles are scored. The last row from Kite (and from the
         # websocket builder) is the bar still forming; judged 20 seconds in,
         # its close is a print and its volume is a sliver.
+        df = session_only(df)
         if cfg.SCAN_CLOSED_BARS_ONLY:
             df, why = self._closed_bars_only(df)
             if why:
@@ -327,6 +329,11 @@ class IndexScanner:
 
         last = pd.Timestamp(closed["timestamp"].iloc[-1])
         expected = bar_start - timedelta(minutes=cfg.BAR_MINUTES)
+        session_open = bar_start.replace(hour=9, minute=15, second=0, microsecond=0)
+        if expected < session_open:
+            # 09:15-09:19: the session's first bar is still forming, so the
+            # newest closed bar is yesterday's. Nothing new to judge yet.
+            return closed, "First bar of the session still forming"
         if last < expected:
             return closed, (f"Last closed bar is {last:%H:%M}, expected {expected:%H:%M} - "
                             f"broker has not published it yet")
