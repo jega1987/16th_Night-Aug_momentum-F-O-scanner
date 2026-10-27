@@ -81,6 +81,19 @@ class IndexScanner:
         if not self.engine:
             return setups
 
+        # Portfolio risk: loss limits stop new signals; sector cap trims them.
+        if setups:
+            import risk
+            stop = risk.loss_limit_reason()
+            if stop:
+                logger.info("[Risk] %s - %d setup(s) not recorded", stop, len(setups))
+                for st in setups:
+                    self._log_scan(st["symbol"], st["timeframe"], st.get("meta", {}),
+                                   passed=False, reason=stop, composite=st.get("composite_score"))
+                setups = []
+            else:
+                setups = risk.apply_sector_cap(setups)
+
         # Strict cap: trim to what the budget allows, highest score first.
         if self.budget:
             setups = self.budget.take(setups)

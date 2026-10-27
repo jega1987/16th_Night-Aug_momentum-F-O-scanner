@@ -180,6 +180,15 @@ async def job_sample_iv():
         logger.warning("[IV] Sampling failed: %s", exc)
 
 
+async def job_sectors():
+    """Refresh the NSE industry map used by the sector cap."""
+    try:
+        import sectors
+        await asyncio.to_thread(sectors.refresh)
+    except Exception as exc:
+        logger.warning("[Sectors] Refresh failed: %s", exc)
+
+
 async def job_retention():
     """Daily housekeeping after the close (see retention.py)."""
     try:
@@ -316,6 +325,9 @@ def register_jobs():
     scheduler.add_job(job_build_universe,
                       CronTrigger(day_of_week="mon-fri", hour=9, minute=45, timezone=IST),
                       id="universe_refresh", replace_existing=True)
+    scheduler.add_job(job_sectors,
+                      CronTrigger(day_of_week="mon-fri", hour=8, minute=20, timezone=IST),
+                      id="sectors", replace_existing=True)
     scheduler.add_job(job_retention,
                       CronTrigger(day_of_week="mon-fri", hour=17, minute=30, timezone=IST),
                       id="retention", replace_existing=True)
@@ -352,6 +364,10 @@ async def warm_up() -> None:
             await job_auto_login()
         if cfg.EQUITY_ENABLED and state.feed_connected and not universe.load():
             await job_build_universe()      # cold start - don't wait for tomorrow
+        if cfg.SECTOR_MAX_OPEN > 0:
+            import sectors
+            if not sectors.load():
+                await job_sectors()         # first run - no map stored yet
         if cfg.RUN_SCHEDULER:
             await job_manage_stream()       # boot mid-session: don't wait a minute
         if state.feed_connected and MarketClock.is_market_open():

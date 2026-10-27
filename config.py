@@ -316,6 +316,17 @@ class StrategyConfig:
     MIN_IV_RANK: float = _float("MIN_IV_RANK", 20.0)
     MAX_IV_RANK: float = _float("MAX_IV_RANK", 80.0)
     IV_RANK_LOOKBACK_DAYS: int = _int("IV_RANK_LOOKBACK_DAYS", 90)
+    # ---------- risk limits ----------
+    # No new signals once today's result (closed R + open trades marked to
+    # market) is at or below -DAILY_LOSS_LIMIT_R, or this week's is at or
+    # below -WEEKLY_LOSS_LIMIT_R. 0 turns a limit off.
+    DAILY_LOSS_LIMIT_R: float = _float("DAILY_LOSS_LIMIT_R", 2.0)
+    WEEKLY_LOSS_LIMIT_R: float = _float("WEEKLY_LOSS_LIMIT_R", 5.0)
+    # At most this many open positions in one NSE industry and direction
+    # (sectors.py). 0 = off.
+    SECTOR_MAX_OPEN: int = _int("SECTOR_MAX_OPEN", 2)
+    SECTOR_SOURCE_URL: str = os.getenv(
+        "SECTOR_SOURCE_URL", "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv")
     # ---------- data retention (retention.py, daily after the close) ----------
     RETENTION_SCAN_DAYS: int = _int("RETENTION_SCAN_DAYS", 30)
     RETENTION_CANDLE_DAYS: int = _int("RETENTION_CANDLE_DAYS", 90)
