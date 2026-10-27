@@ -102,6 +102,10 @@ class MarketFeed(ABC):
         """
         return None
 
+    async def get_strikes(self, symbol: str, expiry: Dict, opt_type: str) -> List[float]:
+        """Strikes actually listed for this expiry and type. Empty if unknown."""
+        return []
+
     async def get_universe(self) -> List[str]:
         from config import cfg
         return list(cfg.INDICES)
