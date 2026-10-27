@@ -635,6 +635,17 @@ PRESETS = {
         ("sector-cap-2", {"BT_SECTOR_MAX": 2}),
         ("all-risk", {"BT_DAY_LOSS_R": 2.0, "BT_WEEK_LOSS_R": 5.0, "BT_SECTOR_MAX": 2}),
     ],
+    # VIX regime robustness: several thresholds, meant for --days 730 so the
+    # older year is out-of-sample for the 27-Oct finding (skip low-VIX days).
+    "vix": [
+        ("live-rules", {}),
+        ("vix-min-20pct", {"BT_VIX_PCT_MIN": 20.0}),
+        ("vix-min-25pct", {"BT_VIX_PCT_MIN": 25.0}),
+        ("vix-min-33pct", {"BT_VIX_PCT_MIN": 33.0}),
+        ("vix-min-50pct", {"BT_VIX_PCT_MIN": 50.0}),
+        ("vix-25-75pct", {"BT_VIX_PCT_MIN": 25.0, "BT_VIX_PCT_MAX": 75.0}),
+        ("vix-max-25pct-only", {"BT_VIX_PCT_MAX": 25.0}),
+    ],
     "regime": [
         ("live-rules", {}),
         ("nifty-trend-adx20", {"BT_MKT_FILTER": True, "BT_MKT_ADX": 20.0}),
@@ -781,6 +792,7 @@ def main(argv=None) -> int:
                                 "all": r["overall"], "stocks_only": stats([t["r"] for t in eq]),
                                 "by_half": r.get("by_half"), "by_exit": r.get("by_exit"),
                                 "by_setup": r.get("by_setup"),
+                                "by_month": r.get("by_month"),
                                 "by_direction": r.get("by_direction"),
                                 "tp1_hit%": r.get("tp1_hit%")}
             if not args.no_save:
