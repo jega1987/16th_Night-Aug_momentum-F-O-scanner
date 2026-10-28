@@ -95,6 +95,7 @@ class KiteFeed(MarketFeed):
         self._quote_cache_at: Dict[str, datetime] = {}
         self._chain_cache: Dict = {}
         self._chain_cache_at: Dict = {}
+        self._spot_fallback_logged: set = set()
 
     # ------------------------------------------------------------------ #
     # Authentication
@@ -320,6 +321,23 @@ class KiteFeed(MarketFeed):
         rows = await self._call(
             lambda: self.kite.historical_data(token, from_dt, to_dt, kite_interval, oi=True),
             f"candles {symbol} {interval}")
+
+        if not rows and use_futures and symbol not in INDEX_LOOKUP:
+            # A stock newly added to F&O has a futures contract with no
+            # history yet. Use the cash-market candles rather than skipping it.
+            try:
+                spot = self._instrument(symbol, False)
+            except KeyError:
+                spot = None
+            if spot and int(spot["instrument_token"]) != token:
+                if symbol not in self._spot_fallback_logged:
+                    self._spot_fallback_logged.add(symbol)
+                    logger.info("[Kite] %s futures have no %s history yet - using cash-market "
+                                "candles", symbol, interval)
+                token = int(spot["instrument_token"])
+                rows = await self._call(
+                    lambda: self.kite.historical_data(token, from_dt, to_dt, kite_interval, oi=True),
+                    f"candles {symbol} {interval} (cash)")
 
         if not rows:
             raise ValueError(f"No candles for {symbol} {interval} "
