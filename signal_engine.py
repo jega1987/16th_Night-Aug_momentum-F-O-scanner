@@ -223,6 +223,9 @@ class SignalEngine:
                 opt_entry=opt.get("opt_entry"), opt_sl=opt.get("opt_sl"),
                 opt_tp1=opt.get("opt_tp1"), opt_tp2=opt.get("opt_tp2"), opt_tp3=opt.get("opt_tp3"),
                 opt_ltp_now=opt.get("opt_entry"), opt_realized=0.0,
+                opt_bid_now=(plan.bid or None) if (plan and opt.get("opt_entry")) else None,
+                opt_ask_now=(plan.ask or None) if (plan and opt.get("opt_entry")) else None,
+                opt_updated_at=(now_naive() if opt.get("opt_entry") else None),
                 opt_pnl=(0.0 if opt.get("opt_entry") else None),
                 opt_qty_open=(levels["qty"] if opt.get("opt_entry") else None),
                 score_direction=scores.get("direction"),
@@ -287,10 +290,16 @@ class SignalEngine:
             k, iv = float(plan.strike), float(plan.iv)
             base = black76_price(float(levels["entry"]), k, t, iv, is_call)
 
-            def at(level):
-                return round(max(0.05, plan.ltp + black76_price(float(level), k, t, iv, is_call) - base), 2)
+            # Paper buy fills at the best ask when one is quoted (a market buy
+            # pays the offer); the stop/targets are re-priced from that fill.
+            fill = float(plan.ltp)
+            if cfg.OPTION_FILL_AT_TOUCH and plan.ask and float(plan.ask) > 0:
+                fill = float(plan.ask)
 
-            return {"opt_entry": round(float(plan.ltp), 2), "opt_sl": at(levels["sl"]),
+            def at(level):
+                return round(max(0.05, fill + black76_price(float(level), k, t, iv, is_call) - base), 2)
+
+            return {"opt_entry": round(fill, 2), "opt_sl": at(levels["sl"]),
                     "opt_tp1": at(levels["tp1"]), "opt_tp2": at(levels["tp2"]),
                     "opt_tp3": at(levels["tp3"])}
         except Exception as exc:
@@ -298,42 +307,68 @@ class SignalEngine:
             return {}
 
     @staticmethod
-    async def _quote_option(feed, s: Dict) -> Optional[float]:
-        """Current premium (bid/ask mid where quoted) of the signal's contract."""
+    async def _quote_option(feed, s: Dict) -> Optional[Dict]:
+        """
+        Current quote of the signal's contract: last traded price, best bid
+        and ask, and the mid. None when Kite returns nothing - that is logged,
+        and the dashboard shows the last price as stale instead of pretending
+        it is live.
+        """
         if not (s.get("opt_entry") and s.get("option_expiry") and s.get("atm_strike")
                 and s.get("option_type")):
             return None
+        label = f"{s.get('symbol')} {s.get('atm_strike')} {s.get('option_type')}"
         try:
             exp = date.fromisoformat(str(s["option_expiry"])[:10])
             q = await feed.get_option_quote(s["symbol"], {"date": exp}, int(s["atm_strike"]),
                                             s["option_type"])
-            price = float((q or {}).get("ltp") or 0)
-            return price if price > 0 else None
         except Exception as exc:
-            logger.debug("[Engine] Option re-quote failed for %s: %s", s.get("symbol"), exc)
+            logger.warning("[Engine] Option quote failed for %s: %s", label, exc)
             return None
+        if not q or not float(q.get("ltp") or 0) > 0:
+            logger.warning("[Engine] No option quote for %s - keeping the last price", label)
+            return None
+        return q
 
     @staticmethod
-    def _update_option(s: Dict, price: Optional[float], qty_before: int) -> bool:
+    def _sell_price(q: Dict) -> float:
+        """What selling the option now would fetch: the best bid, else the mid."""
+        bid = float(q.get("bid") or 0)
+        if cfg.OPTION_FILL_AT_TOUCH and bid > 0:
+            return bid
+        return float(q["ltp"])
+
+    @classmethod
+    def _update_option(cls, s: Dict, q, qty_before: int) -> bool:
         """
         Follow the stock-level scale-outs with the option: quantity closed in
-        this cycle is booked at the current premium; the rest is marked to it.
-        Buying a CE (LONG) or PE (SHORT), so P&L is always premium change x qty.
+        this cycle is booked at the current sell price (best bid); the rest is
+        marked to it. Buying a CE (LONG) or PE (SHORT), so P&L is always
+        premium change x qty. Without a fresh quote the last sell price is
+        reused and opt_updated_at is left alone, so its age shows on screen.
         """
         entry = s.get("opt_entry")
         if not entry:
             return False
-        if price is None:
+        if isinstance(q, (int, float)):            # a bare price (older callers, tests)
+            q = {"ltp": float(q), "last_price": float(q)}
+        if q:
+            price = cls._sell_price(q)
+            s["opt_last_now"] = round(float(q.get("last_price") or q["ltp"]), 2)
+            s["opt_bid_now"] = round(float(q["bid"]), 2) if q.get("bid") else None
+            s["opt_ask_now"] = round(float(q["ask"]), 2) if q.get("ask") else None
+            s["opt_ltp_now"] = round(price, 2)
+            s["opt_updated_at"] = now_naive()
+        else:
             price = s.get("opt_ltp_now") or entry       # no fresh quote: last known
         qty_after = s.get("qty_open") or 0
         closed_qty = max(0, (qty_before or 0) - qty_after)
         if closed_qty:
             s["opt_realized"] = round((s.get("opt_realized") or 0) + (price - entry) * closed_qty, 2)
         s["opt_qty_open"] = qty_after
-        s["opt_ltp_now"] = round(price, 2)
-        s["opt_updated_at"] = now_naive()
         if s.get("status") in ("TP3", "SL", "TRAIL", "SQUAREOFF"):
             s["opt_exit"] = round(price, 2)
+            s["opt_exit_at"] = now_naive()
         s["opt_pnl"] = round((s.get("opt_realized") or 0) + (price - entry) * qty_after, 2)
         return True
 
@@ -366,7 +401,7 @@ class SignalEngine:
             except Exception as exc:
                 logger.warning("[Engine] Cannot price %s this cycle: %s", symbol, exc)
 
-        opt_quotes: Dict[int, Optional[float]] = {}
+        opt_quotes: Dict[int, Optional[Dict]] = {}
         if cfg.OPTION_TRACKING:
             for snap in live:
                 if snap.get("opt_entry"):
@@ -408,7 +443,8 @@ class SignalEngine:
                                 "realized_pnl", "exit_price", "exit_time", "pnl",
                                 "pnl_pct", "r_multiple", "mfe", "notes",
                                 "opt_ltp_now", "opt_updated_at", "opt_exit", "opt_realized",
-                                "opt_pnl", "opt_qty_open"):
+                                "opt_pnl", "opt_qty_open", "opt_last_now", "opt_bid_now",
+                                "opt_ask_now", "opt_exit_at"):
                         setattr(row, key, snap.get(key))
 
             for snap in updates:
@@ -580,7 +616,8 @@ class SignalEngine:
                     for key in ("status", "qty_open", "realized_pnl", "exit_price",
                                 "exit_time", "pnl", "pnl_pct", "r_multiple", "notes",
                                 "opt_ltp_now", "opt_updated_at", "opt_exit", "opt_realized",
-                                "opt_pnl", "opt_qty_open"):
+                                "opt_pnl", "opt_qty_open", "opt_last_now", "opt_bid_now",
+                                "opt_ask_now", "opt_exit_at"):
                         setattr(row, key, snap.get(key))
 
         logger.info("[Engine] Squared off %d open position(s)", len(closed))

@@ -234,6 +234,11 @@ class StrategyConfig:
     MAX_OPEN_POSITIONS: int = _int("MAX_OPEN_POSITIONS", 0)
     # Re-quote each open signal's option every minute and track option P&L.
     OPTION_TRACKING: bool = _bool("OPTION_TRACKING", True)
+    # Paper fills at the touch: buy at the best ask, sell at the best bid
+    # (what a market order would actually get), instead of the bid/ask mid.
+    OPTION_FILL_AT_TOUCH: bool = _bool("OPTION_FILL_AT_TOUCH", True)
+    # An open option price older than this is shown as stale on the dashboard.
+    OPTION_QUOTE_STALE_SEC: int = _int("OPTION_QUOTE_STALE_SEC", 120)
 
     @property
     def is_positional(self) -> bool:

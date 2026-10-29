@@ -47,6 +47,14 @@ templates.env.filters["expiry_label"] = lambda sig: _expiry_label(
     getattr(sig, "option_hint", None) if not isinstance(sig, dict) else sig.get("option_hint"))
 
 
+def _option_now(sig):
+    from pnl_report import option_now
+    return option_now(sig)
+
+
+templates.env.filters["option_now"] = _option_now
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """

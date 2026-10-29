@@ -180,7 +180,8 @@
         <td class="num {% if r.tp1_hit %}hit{% endif %}">{{ '{:,.2f}'.format(r.opt_tp1) if r.opt_tp1 else '—' }}</td>
         <td class="num {% if r.tp2_hit %}hit{% endif %}">{{ '{:,.2f}'.format(r.opt_tp2) if r.opt_tp2 else '—' }}</td>
         <td class="num {% if r.status=='TP3' %}hit{% endif %}">{{ '{:,.2f}'.format(r.opt_tp3) if r.opt_tp3 else '—' }}</td>
-        <td class="num">{{ '{:,.2f}'.format(r.opt_now) if r.opt_now else '—' }}</td>
+{% set ov = r.opt_view or {} %}
+        <td class="num">{{ '{:,.2f}'.format(ov.price) if ov.price else '—' }}{% if ov.note %}<div class="flat" style="font-size:11px{% if ov.stale %};color:var(--hold){% endif %}">{% if ov.stale %}STALE · {% endif %}{{ ov.note }}</div>{% endif %}</td>
         <td class="num {% if p and p > 0 %}up{% elif p and p < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(p) if p is not none else '—' }}</td>
         {% else %}
         <td class="flat" colspan="7" style="text-align:center">no option prices</td>

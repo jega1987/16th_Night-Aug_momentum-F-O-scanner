@@ -188,6 +188,33 @@ def build(f: PnlFilter) -> Dict:
             "rows": [row_view(r, f.basis) for r in rows]}
 
 
+def option_now(r) -> Dict:
+    """
+    How to show the option's current price. Closed: the exit (sell) price and
+    when it was taken - frozen after that, so it will differ from the live
+    market. Open: the exchange last price, the bid/ask behind the P&L, the
+    quote time, and whether that quote is stale.
+    """
+    from clock import now_naive
+    from config import cfg
+    g = (lambda k: r.get(k)) if isinstance(r, dict) else (lambda k: getattr(r, k, None))
+    if g("status") in CLOSED:
+        at = g("opt_exit_at") or g("exit_time")
+        return {"price": g("opt_exit"), "closed": True,
+                "note": f"exit (sold) {at:%d-%m %H:%M}" if at else "exit (sold)", "stale": False}
+    upd = g("opt_updated_at")
+    age = (now_naive() - upd).total_seconds() if upd else None
+    bid, ask = g("opt_bid_now"), g("opt_ask_now")
+    parts = []
+    if bid or ask:
+        parts.append(f"bid {bid or 0:,.2f} · ask {ask or 0:,.2f}")
+    if upd:
+        parts.append(f"at {upd:%H:%M:%S}")
+    return {"price": g("opt_last_now") or g("opt_ltp_now"), "closed": False,
+            "note": " · ".join(parts),
+            "stale": bool(age is None or age > cfg.OPTION_QUOTE_STALE_SEC)}
+
+
 def row_view(r: Signal, basis: str = "option") -> Dict:
     def fmt_t(v):
         return v.strftime("%d-%m %H:%M") if v else None
@@ -201,6 +228,7 @@ def row_view(r: Signal, basis: str = "option") -> Dict:
         "opt_entry": r.opt_entry, "opt_sl": r.opt_sl, "opt_tp1": r.opt_tp1,
         "opt_tp2": r.opt_tp2, "opt_tp3": r.opt_tp3,
         "opt_now": r.opt_exit if r.status in CLOSED else r.opt_ltp_now,
+        "opt_view": option_now(r) if r.opt_entry else None,
         "opt_pnl": r.opt_pnl if r.opt_entry else None,
         "entry": r.entry, "sl": r.sl, "tp1": r.tp1, "tp2": r.tp2, "tp3": r.tp3,
         "exit_price": r.exit_price,
