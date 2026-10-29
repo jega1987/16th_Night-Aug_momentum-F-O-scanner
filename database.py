@@ -140,6 +140,13 @@ class Signal(Base):
     opt_bid_now = Column(Float)         # best bid at the latest quote (paper sell price)
     opt_ask_now = Column(Float)         # best ask at the latest quote
     opt_exit_at = Column(DateTime)      # when the option exit was priced
+    # Option-managed trades: the stop and targets above are premium levels
+    # fixed at entry (option R = stock R x |delta|) and exits fire on the live
+    # option price. manage_basis is 'option' for those, 'stock' otherwise.
+    manage_basis = Column(String)
+    opt_risk = Column(Float)            # option R in premium points
+    opt_trail_sl = Column(Float)        # current premium stop (moves to entry at T1, T1 at T2, Supertrend)
+    opt_token = Column(Integer)         # Kite instrument token of the option contract
 
     score_direction = Column(Float)
     score_squeeze = Column(Float)
@@ -153,7 +160,9 @@ class Signal(Base):
     composite_score = Column(Float)
     factor_breakdown = Column(JSON)
 
-    status = Column(String, default="OPEN", index=True)   # OPEN | RUNNING | TP3 | SL | TRAIL | SQUAREOFF
+    # OPEN | RUNNING | TP3 | SL | TRAIL-PROFIT | TRAIL-STOP | ST-FLIP | SQUAREOFF
+    # (plain TRAIL only on rows written before 29 Oct 2026 and not relabelled)
+    status = Column(String, default="OPEN", index=True)
     tp1_hit = Column(Boolean, default=False)
     tp2_hit = Column(Boolean, default=False)
     qty_open = Column(Integer)
@@ -352,6 +361,37 @@ class ScripMapping(Base):
     oi = Column(Integer, default=0)
 
 
+OPEN_STATUSES = ("OPEN", "RUNNING")
+CLOSED_STATUSES = ("TP3", "SL", "TRAIL", "TRAIL-PROFIT", "TRAIL-STOP", "ST-FLIP", "SQUAREOFF")
+STATUS_LABELS = {
+    "OPEN": "Open, no target yet",
+    "RUNNING": "T1 booked, running",
+    "TP3": "Final target T3 hit",
+    "SL": "Original stop hit",
+    "TRAIL-PROFIT": "Stop hit after T1 (profit locked)",
+    "TRAIL-STOP": "Trailed stop hit before T1",
+    "ST-FLIP": "Supertrend turned against the trade",
+    "SQUAREOFF": "Time exit (2-day limit / before expiry)",
+    "TRAIL": "Trailing stop (old label)",
+}
+
+
+def _relabel_trail() -> None:
+    """Old rows used one TRAIL label for three different exits; split them."""
+    try:
+        with engine.begin() as conn:
+            n1 = conn.execute(text("UPDATE signals SET status='TRAIL-PROFIT' "
+                                   "WHERE status='TRAIL' AND tp1_hit")).rowcount
+            n2 = conn.execute(text("UPDATE signals SET status='ST-FLIP' WHERE status='TRAIL' "
+                                   "AND notes LIKE '%Supertrend flipped%'")).rowcount
+            n3 = conn.execute(text("UPDATE signals SET status='TRAIL-STOP' "
+                                   "WHERE status='TRAIL'")).rowcount
+        if n1 or n2 or n3:
+            logger.info("[DB] Relabelled TRAIL rows: %s profit, %s flip, %s stop", n1, n2, n3)
+    except Exception as exc:
+        logger.warning("[DB] TRAIL relabel skipped: %s", exc)
+
+
 def _add_missing_columns() -> None:
     """
     create_all() creates tables but never ALTERs existing ones. On Railway you
@@ -383,6 +423,7 @@ def _add_missing_columns() -> None:
 def init_db() -> None:
     Base.metadata.create_all(engine)
     _add_missing_columns()
+    _relabel_trail()
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     logger.info("[DB] Schema ready")

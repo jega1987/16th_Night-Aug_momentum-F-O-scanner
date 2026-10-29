@@ -113,7 +113,7 @@
     </select></label>
   <label><span class="lbl">Exit</span>
     <select name="exit">
-      {% for v, t in [('all','Any'),('TP3','Target 3'),('SL','Stop-loss'),('TRAIL','Trailing stop'),('SQUAREOFF','Time / square-off')] %}
+      {% for v, t in [('all','Any'),('TP3','Target 3'),('SL','Stop-loss'),('TRAIL-PROFIT','Trail after T1'),('TRAIL-STOP','Trail before T1'),('ST-FLIP','Supertrend flip'),('SQUAREOFF','Time / square-off')] %}
       <option value="{{ v }}" {% if f.exit == v %}selected{% endif %}>{{ t }}</option>{% endfor %}
     </select></label>
   <div class="actions">
@@ -187,7 +187,7 @@
         <td class="flat" colspan="7" style="text-align:center">no option prices</td>
         {% endif %}
         <td class="num {% if (r.stock_pnl or 0) > 0 %}up{% elif (r.stock_pnl or 0) < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(r.stock_pnl or 0) }}</td>
-        <td class="l">{{ r.status }}{% if r.exit_time %} <span class="flat">{{ r.exit_time }}</span>{% endif %}{% if r.why %}<br><span class="flat" style="font-size:11px">{{ r.why }}</span>{% endif %}</td>
+        <td class="l" title="{{ r.status|status_label }}">{{ r.status }}{% if r.exit_time %} <span class="flat">{{ r.exit_time }}</span>{% endif %}{% if r.why %}<br><span class="flat" style="font-size:11px">{{ r.why }}</span>{% endif %}</td>
         <td class="num">{{ r.lots or '—' }}</td>
       </tr>
     {% endfor %}

@@ -357,6 +357,12 @@ async def warm_up() -> None:
     """
     try:
         await connect_feed()
+        if cfg.TICK_MANAGEMENT and hasattr(feed, "tick_listener"):
+            # Ticks arrive on the WebSocket thread; positions live on this loop.
+            loop = asyncio.get_running_loop()
+            feed.tick_listener = lambda batch: loop.call_soon_threadsafe(engine.on_ticks, batch)
+            if state.feed_connected and MarketClock.is_market_open():
+                await engine.manage_open_positions(feed)   # load + track open trades now
         # Stored token dead and auto-login on? Refresh now rather than waiting
         # for the next scheduled run - the app may have booted mid-session.
         if not state.feed_connected and cfg.KITE_AUTO_LOGIN and cfg.FEED_MODE == "kite":

@@ -38,7 +38,7 @@ from options_layer import (black76_greeks, black76_price, implied_vol, nearest_l
 logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                     format="%(asctime)s %(levelname)-7s optfill  %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("optfill")
-CLOSED = ("TP3", "SL", "TRAIL", "SQUAREOFF")
+from database import CLOSED_STATUSES as CLOSED  # noqa: E402
 
 
 def _contract(feed: KiteFeed, symbol: str, expiry: date, opt_type: str, strike: int) -> Optional[Dict]:

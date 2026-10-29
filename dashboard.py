@@ -55,6 +55,14 @@ def _option_now(sig):
 templates.env.filters["option_now"] = _option_now
 
 
+def _status_label(status):
+    from database import STATUS_LABELS
+    return STATUS_LABELS.get(status or "", status or "")
+
+
+templates.env.filters["status_label"] = _status_label
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """
@@ -75,7 +83,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         status_code=500)
 
 OPEN_STATES = ("OPEN", "RUNNING")
-CLOSED_STATES = ("TP3", "SL", "TRAIL", "SQUAREOFF")
+from database import CLOSED_STATUSES as CLOSED_STATES  # noqa: E402
 
 
 def _parse_symbol_filter(raw: Optional[str]) -> list:

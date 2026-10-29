@@ -23,7 +23,7 @@ from database import Signal, session_scope
 
 logger = logging.getLogger(__name__)
 
-CLOSED_STATES = ("TP3", "SL", "TRAIL", "SQUAREOFF")
+from database import CLOSED_STATUSES as CLOSED_STATES  # noqa: E402
 OPEN_STATES = ("OPEN", "RUNNING")
 
 # How each exit maps to the outcome vocabulary used when reasoning about
