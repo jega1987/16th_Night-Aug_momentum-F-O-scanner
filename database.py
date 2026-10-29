@@ -136,6 +136,10 @@ class Signal(Base):
     opt_realized = Column(Float, default=0.0)   # booked option P&L from scale-outs
     opt_pnl = Column(Float)             # option P&L in rupees (MTM while open)
     opt_qty_open = Column(Integer)
+    opt_last_now = Column(Float)        # exchange last traded price at the latest quote
+    opt_bid_now = Column(Float)         # best bid at the latest quote (paper sell price)
+    opt_ask_now = Column(Float)         # best ask at the latest quote
+    opt_exit_at = Column(DateTime)      # when the option exit was priced
 
     score_direction = Column(Float)
     score_squeeze = Column(Float)

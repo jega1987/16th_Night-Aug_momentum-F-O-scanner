@@ -215,7 +215,7 @@
   <table>
     <thead><tr>
       <th>Time</th><th>Symbol</th><th>Side</th><th>Option</th><th>Buy</th><th>SL</th>
-      <th>T1 / T2 / T3</th><th>Now</th><th>Lots</th><th>Status</th><th>Opt P&amp;L</th>
+      <th>T1 / T2 / T3</th><th>Now / exit</th><th>Lots</th><th>Status</th><th>Opt P&amp;L</th>
     </tr></thead>
     <tbody>
     {% for sig in recent_signals %}
@@ -234,7 +234,10 @@
         <td class="num">{{ '{:,.2f}'.format(sig.opt_entry) }}</td>
         <td class="num down">{{ '{:,.2f}'.format(sig.opt_sl or 0) }}</td>
         <td class="num">{{ '{:,.1f}'.format(sig.opt_tp1 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp2 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp3 or 0) }}</td>
-        <td class="num">{{ '{:,.2f}'.format(now_px) if now_px else '—' }}</td>
+{% set ov = sig|option_now %}
+        <td class="num">{% if ov.price %}{{ '{:,.2f}'.format(ov.price) }}{% else %}—{% endif %}
+          {% if ov.closed %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">{{ ov.note }}</div>
+          {% else %}<div class="lbl" style="text-transform:none;letter-spacing:.02em{% if ov.stale %};color:var(--hold){% endif %}">{% if ov.stale %}STALE · {% endif %}{{ ov.note }}</div>{% endif %}</td>
         {% else %}
         <td class="flat" colspan="4" style="text-align:center">no option prices{% if sig.option_ltp %} · premium {{ sig.option_ltp }}{% endif %}</td>
         {% endif %}
