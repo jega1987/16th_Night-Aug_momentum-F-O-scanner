@@ -237,6 +237,13 @@ class StrategyConfig:
     # Paper fills at the touch: buy at the best ask, sell at the best bid
     # (what a market order would actually get), instead of the bid/ask mid.
     OPTION_FILL_AT_TOUCH: bool = _bool("OPTION_FILL_AT_TOUCH", True)
+    # Run option trades on the premium: stop/targets = fill -/+ multiples of
+    # (stock R x |delta|) and exits fire on the live option price.
+    OPTION_MANAGED: bool = _bool("OPTION_MANAGED", True)
+    # Evaluate open positions on every streamed tick (Kite WebSocket).
+    TICK_MANAGEMENT: bool = _bool("TICK_MANAGEMENT", True)
+    # Persist the mark-to-market of an open position at most this often (s).
+    TICK_PERSIST_SEC: int = _int("TICK_PERSIST_SEC", 5)
     # An open option price older than this is shown as stale on the dashboard.
     OPTION_QUOTE_STALE_SEC: int = _int("OPTION_QUOTE_STALE_SEC", 120)
 

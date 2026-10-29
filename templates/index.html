@@ -229,10 +229,10 @@
           {% if sig.option_blocked %} <span class="tag" style="color:var(--hold)" title="{{ sig.option_block_reason }}">gate</span>{% endif %}
         </td>
         {% if sig.opt_entry %}
-        {% set closed = sig.status in ['TP3','SL','TRAIL','SQUAREOFF'] %}
+        {% set closed = sig.status not in ['OPEN','RUNNING'] %}
         {% set now_px = sig.opt_exit if closed else sig.opt_ltp_now %}
         <td class="num">{{ '{:,.2f}'.format(sig.opt_entry) }}</td>
-        <td class="num down">{{ '{:,.2f}'.format(sig.opt_sl or 0) }}</td>
+        <td class="num down">{{ '{:,.2f}'.format(sig.opt_sl or 0) }}{% if sig.opt_trail_sl and sig.opt_trail_sl != sig.opt_sl and not closed %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">stop now {{ '{:,.2f}'.format(sig.opt_trail_sl) }}</div>{% endif %}</td>
         <td class="num">{{ '{:,.1f}'.format(sig.opt_tp1 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp2 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp3 or 0) }}</td>
 {% set ov = sig|option_now %}
         <td class="num">{% if ov.price %}{{ '{:,.2f}'.format(ov.price) }}{% else %}—{% endif %}
@@ -242,7 +242,7 @@
         <td class="flat" colspan="4" style="text-align:center">no option prices{% if sig.option_ltp %} · premium {{ sig.option_ltp }}{% endif %}</td>
         {% endif %}
         <td class="num">{{ sig.lots or '—' }}</td>
-        <td>{{ sig.status }}</td>
+        <td title="{{ sig.status|status_label }}">{{ sig.status }}{% if sig.manage_basis == 'option' %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">on premium</div>{% endif %}</td>
         {% set op = sig.opt_pnl if sig.opt_entry else none %}
         {% if op is not none %}
         <td class="num {% if op > 0 %}up{% elif op < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(op) }}</td>

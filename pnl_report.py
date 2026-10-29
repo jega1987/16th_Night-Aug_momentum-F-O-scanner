@@ -18,7 +18,7 @@ from clock import now_naive
 from config import cfg
 from database import Signal, session_scope
 
-CLOSED = ("TP3", "SL", "TRAIL", "SQUAREOFF")
+from database import CLOSED_STATUSES as CLOSED  # noqa: E402
 OPEN = ("OPEN", "RUNNING")
 
 
@@ -32,7 +32,7 @@ class PnlFilter:
     asset: str = "all"               # all | INDEX | EQUITY
     side: str = "all"                # all | CALL | PUT
     result: str = "all"              # all | win | loss | open
-    exit: str = "all"                # all | TP3 | SL | TRAIL | SQUAREOFF
+    exit: str = "all"                # all | any closed status
     basis: str = "option"            # option | stock
     errors: List[str] = field(default_factory=list)
 

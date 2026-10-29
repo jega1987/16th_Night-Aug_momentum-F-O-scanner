@@ -85,6 +85,12 @@ class KiteFeed(MarketFeed):
         self.connected = False
         self.last_error: Optional[str] = None
         self.stream = None
+        # Position tracking: option tokens and futures symbols of open trades
+        # stay subscribed (FULL mode for options, for bid/ask) and every tick
+        # on them is handed to tick_listener(batch) - set by main.
+        self.tick_listener = None
+        self._tracked_options: List[int] = []
+        self._tracked_symbols: List[str] = []
         self._sem = asyncio.Semaphore(cfg.MAX_CONCURRENT_FETCHES)
         # Kite's documented ceilings are roughly 3/s for historical and 1/s for
         # quote. One conservative limiter covers both.
@@ -519,18 +525,9 @@ class KiteFeed(MarketFeed):
                     out.add(float(row["strike"]))
         return sorted(out)
 
-    async def get_option_quote(self, symbol: str, expiry: Dict, strike: int,
-                               opt_type: str) -> Optional[Dict]:
-        """
-        One strike, with bid/ask depth. Kite has no option chain endpoint, so
-        the contract is located in the instruments dump and then quoted.
-        """
-        self._require_connection()
+    def _option_contract(self, symbol: str, want_expiry, strike: int, opt_type: str) -> Optional[Dict]:
         root = INDEX_LOOKUP.get(symbol, {}).get("root", symbol).upper()
-        want_expiry = expiry.get("date")
         want_type = str(opt_type).upper()
-
-        contract = None
         for exchange in ("NFO", "BFO"):
             for row in self._instruments.get(exchange, []):
                 if str(row.get("instrument_type", "")).upper() != want_type:
@@ -541,10 +538,34 @@ class KiteFeed(MarketFeed):
                     continue
                 if abs(float(row.get("strike") or 0) - strike) > 0.51:
                     continue
-                contract = row
-                break
-            if contract:
-                break
+                return row
+        return None
+
+    def option_token(self, symbol: str, expiry: date, strike: int, opt_type: str) -> Optional[int]:
+        row = self._option_contract(symbol, expiry, strike, opt_type)
+        return int(row["instrument_token"]) if row else None
+
+    def track_positions(self, option_tokens: List[int], symbols: List[str]) -> None:
+        """Keep these streamed (and pinned against the signal-cap unsubscribe)."""
+        self._tracked_options = sorted({int(t) for t in option_tokens if t})
+        self._tracked_symbols = sorted(set(symbols))
+        if self.stream:
+            fut = {}
+            for sym in self._tracked_symbols:
+                try:
+                    fut[sym] = int(self._instrument(sym, True)["instrument_token"])
+                except KeyError:
+                    pass
+            self.stream.track(self._tracked_options, fut, self.tick_listener)
+
+    async def get_option_quote(self, symbol: str, expiry: Dict, strike: int,
+                               opt_type: str) -> Optional[Dict]:
+        """
+        One strike, with bid/ask depth. Kite has no option chain endpoint, so
+        the contract is located in the instruments dump and then quoted.
+        """
+        self._require_connection()
+        contract = self._option_contract(symbol, expiry.get("date"), strike, opt_type)
         if not contract:
             return None
 
@@ -623,6 +644,8 @@ class KiteFeed(MarketFeed):
         self.stream = KiteTickStream(cfg.KITE_API_KEY, self.kite.access_token,
                                      token_map, minutes=minutes)
         self.stream.start()
+        if self._tracked_options or self._tracked_symbols:
+            self.track_positions(self._tracked_options, self._tracked_symbols)
         logger.info("[WS] Streaming %d instrument(s) at %dm bars", len(token_map), minutes)
         return True
 
@@ -688,6 +711,11 @@ class KiteTickStream:
         self.last_message_at: Optional[datetime] = None
         self.error: Optional[str] = None
         self._lock = threading.Lock()
+        # Open-position tracking (see KiteFeed.track_positions)
+        self.option_tokens: set = set()
+        self.position_futures: Dict[int, str] = {}     # futures token -> symbol
+        self.on_position_tick = None
+        self.position_ticks = 0
 
         self.ticker = KiteTicker(api_key, access_token)
         self.ticker.on_ticks = self._on_ticks
@@ -727,12 +755,68 @@ class KiteTickStream:
         # everything the bar builder and the OI filter need. FULL adds market
         # depth per tick and far more bandwidth for no benefit here.
         ws.set_mode(ws.MODE_QUOTE, tokens)
+        if self.option_tokens:
+            extra = list(self.option_tokens)
+            ws.subscribe(extra)
+            ws.set_mode(ws.MODE_FULL, extra)          # FULL carries the bid/ask depth
         self.connected = True
         self.subscribed = True
-        logger.info("[WS] Connected, subscribed to %d token(s)", len(tokens))
+        logger.info("[WS] Connected, subscribed to %d token(s) + %d option(s) of open trades",
+                    len(tokens), len(self.option_tokens))
+
+    def track(self, option_tokens: List[int], futures: Dict[str, int], listener) -> None:
+        """Stream open trades' options (FULL mode) and route their ticks."""
+        self.on_position_tick = listener
+        new = [t for t in option_tokens if t not in self.option_tokens]
+        gone = [t for t in self.option_tokens if t not in set(option_tokens)]
+        self.option_tokens = set(option_tokens)
+        self.position_futures = {tok: sym for sym, tok in futures.items()}
+        if not self.connected:
+            return                                     # _on_connect subscribes them
+        try:
+            if new:
+                self._on_reactor(self.ticker.subscribe, new)
+                self._on_reactor(self.ticker.set_mode, self.ticker.MODE_FULL, new)
+                logger.info("[WS] Streaming %d option contract(s) of open trades", len(new))
+            if gone:
+                self._on_reactor(self.ticker.unsubscribe, gone)
+            fut_tokens = list(self.position_futures)
+            if fut_tokens:
+                # Re-subscribe in case the signal cap unsubscribed the universe.
+                self._on_reactor(self.ticker.subscribe, fut_tokens)
+                self._on_reactor(self.ticker.set_mode, self.ticker.MODE_QUOTE, fut_tokens)
+        except Exception as exc:
+            logger.warning("[WS] Position tracking subscribe failed: %s", exc)
 
     def _on_ticks(self, ws, ticks):
         stamp = now_naive()
+        pos_batch = []
+        for tick in ticks or []:
+            tok = tick.get("instrument_token")
+            price = float(tick.get("last_price") or 0)
+            if price <= 0:
+                continue
+            if tok in self.option_tokens:
+                depth = tick.get("depth") or {}
+                buy, sell = depth.get("buy") or [], depth.get("sell") or []
+                bid = float(buy[0]["price"]) if buy and buy[0].get("price") else 0.0
+                ask = float(sell[0]["price"]) if sell and sell[0].get("price") else 0.0
+                ts = tick.get("exchange_timestamp") or tick.get("last_trade_time") or stamp
+                if isinstance(ts, datetime) and ts.tzinfo is not None:
+                    ts = ts.replace(tzinfo=None)
+                pos_batch.append({"token": tok, "last_price": price, "bid": bid or None,
+                                  "ask": ask or None,
+                                  "mid": (bid + ask) / 2 if bid > 0 and ask > 0 else None,
+                                  "ts": ts})
+            elif tok in self.position_futures:
+                pos_batch.append({"token": tok, "symbol": self.position_futures[tok],
+                                  "last_price": price})
+        if pos_batch and self.on_position_tick:
+            self.position_ticks += len(pos_batch)
+            try:
+                self.on_position_tick(pos_batch)
+            except Exception as exc:
+                logger.warning("[WS] Position tick handler failed: %s", exc)
         with self._lock:
             self.last_message_at = stamp
             for tick in ticks or []:
@@ -768,7 +852,8 @@ class KiteTickStream:
     def unsubscribe(self, symbols: List[str] = None) -> bool:
         """Stop consuming the feed once the daily signal cap is reached."""
         targets = symbols or list(self.token_map)
-        tokens = [self.token_map[s] for s in targets if s in self.token_map]
+        pinned = set(self.position_futures.values())   # open trades keep streaming
+        tokens = [self.token_map[s] for s in targets if s in self.token_map and s not in pinned]
         if not tokens:
             return False
         try:
@@ -805,6 +890,8 @@ class KiteTickStream:
             "subscribed": self.subscribed,
             "instruments": len(self.token_map),
             "ticks": self.tick_count,
+            "position_ticks": self.position_ticks,
+            "tracked_options": len(self.option_tokens),
             "stale": self.is_stale(),
             "last_message": self.last_message_at.isoformat() if self.last_message_at else None,
             "error": self.error,
