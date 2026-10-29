@@ -801,13 +801,13 @@ class KiteTickStream:
                 buy, sell = depth.get("buy") or [], depth.get("sell") or []
                 bid = float(buy[0]["price"]) if buy and buy[0].get("price") else 0.0
                 ask = float(sell[0]["price"]) if sell and sell[0].get("price") else 0.0
-                ts = tick.get("exchange_timestamp") or tick.get("last_trade_time") or stamp
-                if isinstance(ts, datetime) and ts.tzinfo is not None:
-                    ts = ts.replace(tzinfo=None)
+                # Receive time in IST. KiteTicker converts exchange timestamps
+                # with the container's clock (UTC on Railway), which would make
+                # every quote look 5.5 hours old.
                 pos_batch.append({"token": tok, "last_price": price, "bid": bid or None,
                                   "ask": ask or None,
                                   "mid": (bid + ask) / 2 if bid > 0 and ask > 0 else None,
-                                  "ts": ts})
+                                  "ts": stamp})
             elif tok in self.position_futures:
                 pos_batch.append({"token": tok, "symbol": self.position_futures[tok],
                                   "last_price": price})
