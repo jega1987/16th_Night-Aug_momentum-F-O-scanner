@@ -89,6 +89,8 @@ class KiteFeed(MarketFeed):
         # stay subscribed (FULL mode for options, for bid/ask) and every tick
         # on them is handed to tick_listener(batch) - set by main.
         self.tick_listener = None
+        self.early_listener = None          # early-breakout alerts (rule 6, secondary)
+        self._armed: Dict[str, tuple] = {}
         self._tracked_options: List[int] = []
         self._tracked_symbols: List[str] = []
         self._sem = asyncio.Semaphore(cfg.MAX_CONCURRENT_FETCHES)
@@ -558,6 +560,13 @@ class KiteFeed(MarketFeed):
                     pass
             self.stream.track(self._tracked_options, fut, self.tick_listener)
 
+    def arm_early(self, armed: Dict[str, tuple]) -> None:
+        """Ranges to watch tick by tick for an early (pre-close) breakout alert."""
+        self._armed = dict(armed)
+        if self.stream:
+            self.stream.armed = dict(armed)
+            self.stream.on_early = self.early_listener
+
     async def get_option_quote(self, symbol: str, expiry: Dict, strike: int,
                                opt_type: str) -> Optional[Dict]:
         """
@@ -644,6 +653,8 @@ class KiteFeed(MarketFeed):
         self.stream = KiteTickStream(cfg.KITE_API_KEY, self.kite.access_token,
                                      token_map, minutes=minutes)
         self.stream.start()
+        if self._armed:
+            self.arm_early(self._armed)
         if self._tracked_options or self._tracked_symbols:
             self.track_positions(self._tracked_options, self._tracked_symbols)
         logger.info("[WS] Streaming %d instrument(s) at %dm bars", len(token_map), minutes)
@@ -716,6 +727,9 @@ class KiteTickStream:
         self.position_futures: Dict[int, str] = {}     # futures token -> symbol
         self.on_position_tick = None
         self.position_ticks = 0
+        # Early-breakout alerts: symbol -> (hi, lo); fired once, then disarmed.
+        self.armed: Dict[str, tuple] = {}
+        self.on_early = None
 
         self.ticker = KiteTicker(api_key, access_token)
         self.ticker.on_ticks = self._on_ticks
@@ -811,6 +825,24 @@ class KiteTickStream:
             elif tok in self.position_futures:
                 pos_batch.append({"token": tok, "symbol": self.position_futures[tok],
                                   "last_price": price})
+        if self.armed and self.on_early:
+            early = []
+            for tick in ticks or []:
+                sym = self.by_token.get(tick.get("instrument_token"))
+                rng = self.armed.get(sym) if sym else None
+                if not rng:
+                    continue
+                px = float(tick.get("last_price") or 0)
+                hi, lo = rng[0], rng[1]
+                if px > hi or (0 < px < lo):
+                    self.armed.pop(sym, None)
+                    early.append({"symbol": sym, "price": px, "side": 1 if px > hi else -1,
+                                  "hi": hi, "lo": lo, "at": stamp})
+            if early:
+                try:
+                    self.on_early(early)
+                except Exception as exc:
+                    logger.warning("[WS] Early alert handler failed: %s", exc)
         if pos_batch and self.on_position_tick:
             self.position_ticks += len(pos_batch)
             try:

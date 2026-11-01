@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
-from indicators import (adx, atr, bars_since, compression_setups, ema, rsi,
+from indicators import (adx, atr, bars_since, breakout_states, compression_setups, ema, rsi,
                         squeeze_range, squeeze_start_timestamp, swing_points)
 
 
@@ -64,82 +64,94 @@ class FilterEngine:
             res.reason = f"Not enough {cfg.SQUEEZE_TIMEFRAME} candles for the squeeze ({len(sqz_df)})"
             return res
         base = sqz_df if hybrid else df
-        # One or more coil detectors (cfg.SQUEEZE_DETECTOR). The first one
-        # whose coil is fresh - recently released, or still on and old enough
-        # in hybrid mode - supplies the range; otherwise the first is reported.
-        chosen = None
-        for name, in_sqz, sqz_dur, fired in compression_setups(base, cfg):
-            since_fire = bars_since(fired)
-            # Hybrid: a coil that is still on counts once it is old enough -
-            # the 5-minute close breaking its range IS the release, often a
-            # bar or two before the 15-minute bands confirm it.
-            live_coil = bool(hybrid and in_sqz.iloc[-1]
-                             and int(sqz_dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS)
-            cand = (name, in_sqz, sqz_dur, since_fire, live_coil)
-            if chosen is None:
-                chosen = cand
-            if since_fire <= cfg.MAX_BARS_SINCE_FIRE or live_coil:
-                chosen = cand
-                break
-        setup, in_sqz, sqz_dur, since_fire, live_coil = chosen
-        hi, lo = squeeze_range(base, in_sqz, sqz_dur, cfg.SQUEEZE_RANGE_MAX_BARS)
-
-        res.meta.update({
-            "setup": setup,
-            "squeeze_tf": cfg.SQUEEZE_TIMEFRAME if hybrid else cfg.TIMEFRAME,
-            "in_squeeze": bool(in_sqz.iloc[-1]),
-            "squeeze_bars": int(sqz_dur.iloc[-1]),
-            "bars_since_fire": int(min(since_fire, 9999)),
-            "squeeze_high": round(hi, 2),
-            "squeeze_low": round(lo, 2),
-            "close": float(latest["close"]),
-            # The breakout bar's own extremes - a structural stop reference.
-            "bar_high": float(latest["high"]),
-            "bar_low": float(latest["low"]),
-        })
-        if "timestamp" in df.columns:
-            res.meta["bar_time"] = str(latest["timestamp"])
-
-        # 1. Squeeze must have actually released recently ------------------
-        fresh = since_fire <= cfg.MAX_BARS_SINCE_FIRE or live_coil
-        res.scores["squeeze"] = 1.0 if fresh else 0.0
-        if res.scores["squeeze"] < 1.0 and "squeeze" in cfg.HARD_FAIL_FACTORS:
-            if in_sqz.iloc[-1]:
-                res.reason = (f"Still compressing ({int(sqz_dur.iloc[-1])}/{cfg.MIN_SQUEEZE_BARS} "
-                              f"{cfg.SQUEEZE_TIMEFRAME} bars)" if hybrid else "Still compressing")
-            else:
-                res.reason = f"No squeeze release in last {cfg.MAX_BARS_SINCE_FIRE} bars"
-            return res
-
-        # 1b. ...and the coil has to belong to this session. A squeeze that
-        # started yesterday afternoon and "released" on today's opening bar is
-        # an overnight gap wearing a Bollinger band, not a compression.
-        started = None
-        if "timestamp" in df.columns and "timestamp" in base.columns:
-            started = squeeze_start_timestamp(base, in_sqz, sqz_dur)
-            if started is not None:
-                res.meta["squeeze_start"] = started.strftime("%d-%m %H:%M")
-        if cfg.REQUIRE_INTRADAY_SQUEEZE and "timestamp" in df.columns:
-            last_ts = pd.Timestamp(latest["timestamp"])
-            if started is not None:
-                if started.date() != last_ts.date():
-                    res.scores["squeeze"] = 0.0
-                    res.reason = f"Squeeze spans the previous session (began {started:%d-%m %H:%M})"
-                    return res
-
-        # 2. Direction: close outside the compression range ----------------
-        close = float(latest["close"])
-        if close > hi:
-            res.direction = "LONG"
-            res.scores["direction"] = 1.0
-        elif close < lo:
-            res.direction = "SHORT"
-            res.scores["direction"] = 1.0
+        if (cfg.BREAKOUT_MODE == "first_break" and hybrid and "timestamp" in df.columns
+                and "timestamp" in base.columns):
+            early = self._first_break(df, base, res)
+            if early is not None:
+                early.meta.pop("_started", None)
+                return early
+            direction = res.direction
+            hi, lo = res.meta["squeeze_high"], res.meta["squeeze_low"]
+            started = res.meta.pop("_started", None)
+            latest = df.iloc[-1]
+            close = float(latest["close"])
         else:
-            res.scores["direction"] = 0.0
-            res.reason = f"Close {close:.2f} inside squeeze range {lo:.2f}-{hi:.2f}"
-            return res
-        direction = res.direction
+            # One or more coil detectors (cfg.SQUEEZE_DETECTOR). The first one
+            # whose coil is fresh - recently released, or still on and old enough
+            # in hybrid mode - supplies the range; otherwise the first is reported.
+            chosen = None
+            for name, in_sqz, sqz_dur, fired in compression_setups(base, cfg):
+                since_fire = bars_since(fired)
+                # Hybrid: a coil that is still on counts once it is old enough -
+                # the 5-minute close breaking its range IS the release, often a
+                # bar or two before the 15-minute bands confirm it.
+                live_coil = bool(hybrid and in_sqz.iloc[-1]
+                                 and int(sqz_dur.iloc[-1]) >= cfg.MIN_SQUEEZE_BARS)
+                cand = (name, in_sqz, sqz_dur, since_fire, live_coil)
+                if chosen is None:
+                    chosen = cand
+                if since_fire <= cfg.MAX_BARS_SINCE_FIRE or live_coil:
+                    chosen = cand
+                    break
+            setup, in_sqz, sqz_dur, since_fire, live_coil = chosen
+            hi, lo = squeeze_range(base, in_sqz, sqz_dur, cfg.SQUEEZE_RANGE_MAX_BARS)
+
+            res.meta.update({
+                "setup": setup,
+                "squeeze_tf": cfg.SQUEEZE_TIMEFRAME if hybrid else cfg.TIMEFRAME,
+                "in_squeeze": bool(in_sqz.iloc[-1]),
+                "squeeze_bars": int(sqz_dur.iloc[-1]),
+                "bars_since_fire": int(min(since_fire, 9999)),
+                "squeeze_high": round(hi, 2),
+                "squeeze_low": round(lo, 2),
+                "close": float(latest["close"]),
+                # The breakout bar's own extremes - a structural stop reference.
+                "bar_high": float(latest["high"]),
+                "bar_low": float(latest["low"]),
+            })
+            if "timestamp" in df.columns:
+                res.meta["bar_time"] = str(latest["timestamp"])
+
+            # 1. Squeeze must have actually released recently ------------------
+            fresh = since_fire <= cfg.MAX_BARS_SINCE_FIRE or live_coil
+            res.scores["squeeze"] = 1.0 if fresh else 0.0
+            if res.scores["squeeze"] < 1.0 and "squeeze" in cfg.HARD_FAIL_FACTORS:
+                if in_sqz.iloc[-1]:
+                    res.reason = (f"Still compressing ({int(sqz_dur.iloc[-1])}/{cfg.MIN_SQUEEZE_BARS} "
+                                  f"{cfg.SQUEEZE_TIMEFRAME} bars)" if hybrid else "Still compressing")
+                else:
+                    res.reason = f"No squeeze release in last {cfg.MAX_BARS_SINCE_FIRE} bars"
+                return res
+
+            # 1b. ...and the coil has to belong to this session. A squeeze that
+            # started yesterday afternoon and "released" on today's opening bar is
+            # an overnight gap wearing a Bollinger band, not a compression.
+            started = None
+            if "timestamp" in df.columns and "timestamp" in base.columns:
+                started = squeeze_start_timestamp(base, in_sqz, sqz_dur)
+                if started is not None:
+                    res.meta["squeeze_start"] = started.strftime("%d-%m %H:%M")
+            if cfg.REQUIRE_INTRADAY_SQUEEZE and "timestamp" in df.columns:
+                last_ts = pd.Timestamp(latest["timestamp"])
+                if started is not None:
+                    if started.date() != last_ts.date():
+                        res.scores["squeeze"] = 0.0
+                        res.reason = f"Squeeze spans the previous session (began {started:%d-%m %H:%M})"
+                        return res
+
+            # 2. Direction: close outside the compression range ----------------
+            close = float(latest["close"])
+            if close > hi:
+                res.direction = "LONG"
+                res.scores["direction"] = 1.0
+            elif close < lo:
+                res.direction = "SHORT"
+                res.scores["direction"] = 1.0
+            else:
+                res.scores["direction"] = 0.0
+                res.reason = f"Close {close:.2f} inside squeeze range {lo:.2f}-{hi:.2f}"
+                return res
+            direction = res.direction
 
         # 2b. Gap filter. When the coil began on an earlier day, today's open
         # may already sit beyond the range - the "breakout" happened overnight
@@ -177,6 +189,9 @@ class FilterEngine:
             adx_val = 0.0
             res.scores["adx"] = 1.0
         res.meta["adx_value"] = round(adx_val, 2)
+        # Passed the threshold but still weak: traded, tagged, ranked last.
+        res.meta["adx_low"] = bool(cfg.USE_ADX_FILTER and adx_val > adx_min
+                                   and adx_val <= cfg.ADX_LOW_TAG)
 
         # 5. RSI confluence -------------------------------------------------
         if cfg.USE_RSI_FILTER:
@@ -244,6 +259,72 @@ class FilterEngine:
         return res
 
     # ------------------------------------------------------------------ #
+    def _first_break(self, df: pd.DataFrame, base: pd.DataFrame, res: "FilterResult"):
+        """
+        Steps 1-2 under BREAKOUT_MODE=first_break (see indicators.breakout_states).
+        Fills res.meta / res.scores / res.direction. Returns res when the bar is
+        rejected, None when it is an actionable first breakout.
+        """
+        cfg = self.cfg
+        latest = df.iloc[-1]
+        chosen = None
+        for name, in_sqz, sqz_dur, fired in compression_setups(base, cfg):
+            st = breakout_states(base, df.iloc[-(cfg.COIL_MEMORY_BARS * 3 + 60):], in_sqz, sqz_dur,
+                                 cfg.MIN_SQUEEZE_BARS, cfg.COIL_MEMORY_BARS,
+                                 cfg.BREAKOUT_VALID_BARS, cfg.SQUEEZE_RANGE_MAX_BARS).iloc[-1]
+            rank = {"breakout": 0, "stale": 1, "inside": 2, "compressing": 3, "none": 4}[st["state"]]
+            if chosen is None or rank < chosen[0]:
+                chosen = (rank, name, st, in_sqz, sqz_dur, fired)
+            if rank == 0:
+                break
+        _, name, st, in_sqz, sqz_dur, fired = chosen
+        state = st["state"]
+        coil_start = int(st["coil_start"])
+        started = (pd.Timestamp(base["timestamp"].iloc[coil_start])
+                   if coil_start >= 0 else None)
+        hi = float(st["hi"]) if not pd.isna(st["hi"]) else None
+        lo = float(st["lo"]) if not pd.isna(st["lo"]) else None
+        res.meta.update({
+            "setup": name, "squeeze_tf": cfg.SQUEEZE_TIMEFRAME,
+            "in_squeeze": bool(in_sqz.iloc[-1]), "squeeze_bars": int(st["coil_bars"]),
+            "bars_since_fire": int(min(bars_since(fired), 9999)),
+            "squeeze_high": round(hi, 2) if hi is not None else None,
+            "squeeze_low": round(lo, 2) if lo is not None else None,
+            "close": float(latest["close"]), "bar_high": float(latest["high"]),
+            "bar_low": float(latest["low"]), "bar_time": str(latest["timestamp"]),
+            "coil_state": state,
+        })
+        if started is not None:
+            res.meta["squeeze_start"] = started.strftime("%d-%m %H:%M")
+            res.meta["_started"] = started
+        if int(st["break_i"]) >= 0:
+            bi = len(df) - 1 - int(st["bars_since_break"])
+            res.meta["breakout_at"] = str(df["timestamp"].iloc[bi])
+        if state in ("none", "compressing"):
+            res.scores["squeeze"] = 0.0
+            res.reason = (f"Still compressing ({int(st['coil_bars'])}/{cfg.MIN_SQUEEZE_BARS} "
+                          f"{cfg.SQUEEZE_TIMEFRAME} bars)" if state == "compressing"
+                          else "No squeeze in memory")
+            return res
+        res.scores["squeeze"] = 1.0
+        if state == "inside":
+            res.scores["direction"] = 0.0
+            res.reason = f"Close {float(latest['close']):.2f} inside squeeze range {lo:.2f}-{hi:.2f}"
+            return res
+        if state == "stale":
+            res.scores["direction"] = 0.0
+            res.reason = (f"Breakout began {pd.Timestamp(res.meta['breakout_at']):%H:%M}, more than "
+                          f"{cfg.BREAKOUT_VALID_BARS} bars ago - not chasing")
+            return res
+        res.direction = "LONG" if int(st["side"]) > 0 else "SHORT"
+        res.scores["direction"] = 1.0
+        if cfg.REQUIRE_INTRADAY_SQUEEZE and started is not None \
+                and started.date() != pd.Timestamp(latest["timestamp"]).date():
+            res.scores["squeeze"] = 0.0
+            res.reason = f"Squeeze spans the previous session (began {started:%d-%m %H:%M})"
+            return res
+        return None
+
     def _check_sweep(self, df: pd.DataFrame, direction: str) -> bool:
         """
         A sweep is a wick through a level that was set *before* the candles we

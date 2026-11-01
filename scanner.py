@@ -7,6 +7,7 @@ that log is the only way to tell "no setups" apart from "broken feed".
 """
 import asyncio
 import logging
+import numpy as np
 import pandas as pd
 from datetime import timedelta
 from typing import Dict, List, Optional
@@ -35,6 +36,8 @@ class IndexScanner:
         self.filters = FilterEngine(cfg)
         self.last_scan_at = None
         self.last_error: Optional[str] = None
+        self._armed: Dict[str, tuple] = {}
+        self.notifier = getattr(engine, "notifier", None)
 
     # ------------------------------------------------------------------ #
     def symbols(self) -> List[str]:
@@ -70,6 +73,11 @@ class IndexScanner:
             elif outcome:
                 results.append(outcome)
 
+        if cfg.EARLY_ALERTS and hasattr(self.feed, "arm_early"):
+            try:
+                self.feed.arm_early(self._armed)
+            except Exception as exc:
+                logger.debug("[Scanner] Early-alert arming failed: %s", exc)
         self.last_scan_at = now_naive()
         logger.info("[Scanner] %s scan complete - %d setup(s) from %d symbol(s)",
                     tf, len(results), len(watchlist))
@@ -94,7 +102,22 @@ class IndexScanner:
             else:
                 setups = risk.apply_sector_cap(setups)
 
-        # Strict cap: trim to what the budget allows, highest score first.
+        # Sector trend (soft): tag each stock setup; aligned ones rank first.
+        if setups:
+            import sector_trend
+            for st in setups:
+                try:
+                    await sector_trend.tag(self.feed, st)
+                except Exception as exc:
+                    logger.debug("[Sector] %s tag failed: %s", st.get("symbol"), exc)
+                st["rank_score"] = sector_trend.rank_key(st)
+                m = st.get("meta") or {}
+                if m.get("adx_low") or m.get("sector_note"):
+                    logger.info("[Scanner] %s %s rank %.2f | %s%s", st["symbol"], st["direction"],
+                                st["rank_score"], m.get("sector_note") or "",
+                                " | LOW-ADX" if m.get("adx_low") else "")
+
+        # Strict cap: trim to what the budget allows, best ranked first.
         if self.budget:
             setups = self.budget.take(setups)
 
@@ -105,7 +128,7 @@ class IndexScanner:
                               .filter(Signal.status.in_(["OPEN", "RUNNING"])).count())
             room = max(0, cfg.MAX_OPEN_POSITIONS - open_now)
             if len(setups) > room:
-                ranked = sorted(setups, key=lambda x: -x.get("composite_score", 0.0))
+                ranked = sorted(setups, key=lambda x: -x.get("rank_score", x.get("composite_score", 0.0)))
                 logger.info("[Scanner] %d open position(s), cap %d - keeping %d of %d setup(s)",
                             open_now, cfg.MAX_OPEN_POSITIONS, room, len(setups))
                 setups = ranked[:room]
@@ -186,6 +209,14 @@ class IndexScanner:
                        reason=result.reason,
                        composite=result.scores.get("composite"),
                        factors=result.scores)
+
+        # Remember coils that are armed but not yet broken, for the tick-level
+        # early alert (rule 6, secondary trigger).
+        m = result.meta
+        if m.get("coil_state") == "inside" and m.get("squeeze_high") and m.get("squeeze_low"):
+            self._armed[symbol] = (float(m["squeeze_high"]), float(m["squeeze_low"]))
+        else:
+            self._armed.pop(symbol, None)
 
         if not result.passed:
             logger.debug("[Scanner] %s rejected: %s", symbol, result.reason)
@@ -443,6 +474,35 @@ class IndexScanner:
             return None
         return float(vols.mean())
 
+    def on_early(self, alerts: List[Dict]) -> None:
+        """
+        Live price crossed a remembered coil range (tick level). An alert only:
+        the trade still needs the 5-minute close and every check.
+        """
+        if not hasattr(self, "_early_sent"):
+            self._early_sent = set()
+        for a in alerts:
+            day = a["at"].date() if hasattr(a.get("at"), "date") else now_naive().date()
+            key = (a["symbol"], a["side"], round(a["hi"], 2), round(a["lo"], 2), day)
+            if key in self._early_sent:
+                continue
+            self._early_sent.add(key)
+            side = "CALL" if a["side"] > 0 else "PUT"
+            level = a["hi"] if a["side"] > 0 else a["lo"]
+            msg = (f"EARLY {side} {a['symbol']}: live {a['price']:.2f} crossed the squeeze "
+                   f"{'high' if a['side'] > 0 else 'low'} {level:.2f} - waiting for the 5-min close "
+                   f"and checks")
+            logger.info("[Early] %s", msg)
+            self._log_scan(a["symbol"], cfg.TIMEFRAME,
+                           {"squeeze_high": a["hi"], "squeeze_low": a["lo"], "close": a["price"],
+                            "coil_state": "early"},
+                           passed=False, reason=msg)
+            if self.notifier:
+                try:
+                    asyncio.ensure_future(self.notifier.send("⚡ " + msg))
+                except Exception as exc:
+                    logger.debug("[Early] alert send failed: %s", exc)
+
     @staticmethod
     def _worth_a_second_look(df: pd.DataFrame, hybrid: bool = False) -> bool:
         """Stage-1 triage: has a squeeze released recently enough to matter?"""
@@ -454,6 +514,19 @@ class IndexScanner:
                     return True
                 if bars_since(fired) <= cfg.MAX_BARS_SINCE_FIRE:
                     return True
+                if hybrid and cfg.BREAKOUT_MODE == "first_break":
+                    # Coil memory: a qualifying coil that ended recently can
+                    # still be broken out of after the bands have widened.
+                    sq = in_sqz.to_numpy(dtype=bool)
+                    idx = np.flatnonzero(sq[-(cfg.COIL_MEMORY_BARS + 1):])
+                    if idx.size:
+                        last = len(sq) - (cfg.COIL_MEMORY_BARS + 1) + int(idx[-1])
+                        if int(dur.iloc[last]) >= cfg.MIN_SQUEEZE_BARS:
+                            return True
+                    # a qualifying coil anywhere inside the memory window
+                    window = dur.iloc[-(cfg.COIL_MEMORY_BARS + 1):]
+                    if (window >= cfg.MIN_SQUEEZE_BARS).any():
+                        return True
             return False
         except Exception:
             return True   # when in doubt, do the full check
