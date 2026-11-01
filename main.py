@@ -364,11 +364,13 @@ async def warm_up() -> None:
     """
     try:
         await connect_feed()
-        if cfg.TICK_MANAGEMENT and hasattr(feed, "tick_listener"):
+        # Only the process that owns the jobs (the worker) manages positions;
+        # the web service may sleep and wake at any time and must not.
+        if cfg.RUN_SCHEDULER and cfg.TICK_MANAGEMENT and hasattr(feed, "tick_listener"):
             # Ticks arrive on the WebSocket thread; positions live on this loop.
             loop = asyncio.get_running_loop()
             feed.tick_listener = lambda batch: loop.call_soon_threadsafe(engine.on_ticks, batch)
-        if cfg.EARLY_ALERTS and hasattr(feed, "early_listener"):
+        if cfg.RUN_SCHEDULER and cfg.EARLY_ALERTS and hasattr(feed, "early_listener"):
             loop = asyncio.get_running_loop()
             feed.early_listener = lambda alerts: loop.call_soon_threadsafe(scanner.on_early, alerts)
             if state.feed_connected and MarketClock.is_market_open():
@@ -419,8 +421,9 @@ async def lifespan(_app):
         warm.cancel()
         if getattr(feed, "stop_stream", None):
             feed.stop_stream()
-        scheduler.shutdown(wait=False)
-        logger.info("[Shutdown] Scheduler stopped")
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+            logger.info("[Shutdown] Scheduler stopped")
 
 
 # dashboard.app is imported after runtime so the singletons exist first.
