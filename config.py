@@ -429,6 +429,11 @@ class StrategyConfig:
 
     # ---------- websocket streaming ----------
     USE_WEBSOCKET: bool = _bool("USE_WEBSOCKET", True)
+    # Scan start, seconds after each 5-min mark. With a healthy stream the
+    # bar is built from ticks and is final at the mark, so the scan starts at
+    # SCAN_FAST_SECOND; otherwise it waits for Kite to publish (SCAN_REST_SECOND).
+    SCAN_FAST_SECOND: int = _int("SCAN_FAST_SECOND", 2)
+    SCAN_REST_SECOND: int = _int("SCAN_REST_SECOND", 20)
     WS_RECONNECT_SECONDS: int = _int("WS_RECONNECT_SECONDS", 15)
     WS_STALE_SECONDS: int = _int("WS_STALE_SECONDS", 120)
     # Unsubscribe the feed once the daily cap is reached.

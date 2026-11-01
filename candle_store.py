@@ -64,6 +64,12 @@ class CandleStore:
         self.feed = feed
         self.api_calls_saved = 0
         self.api_calls_made = 0
+        # In-memory copy of stored history per (symbol, timeframe), so a scan
+        # with a healthy stream needs no database read and no REST call; and
+        # the last streamed bar already persisted, so only new bars are written.
+        self._mem: Dict = {}
+        self._persisted: Dict = {}
+        self._short = set()
 
     # ------------------------------------------------------------------ #
     async def get(self, symbol: str, timeframe: str, bars: int,
@@ -83,7 +89,7 @@ class CandleStore:
         frozen data.
         """
         live = self._live_bars(symbol, timeframe)
-        stored = self.read(symbol, timeframe, bars)
+        stored = self._cached_read(symbol, timeframe, bars)
         last_ts = stored["timestamp"].iloc[-1] if len(stored) else None
 
         have_history = len(stored) >= bars * 0.9
@@ -105,6 +111,8 @@ class CandleStore:
 
         self.write(symbol, timeframe, fresh)
         merged = self.read(symbol, timeframe, bars)
+        self._mem[(symbol, timeframe)] = merged
+        self._short.discard((symbol, timeframe))
         base = merged if len(merged) else fresh
         return splice(base, live).tail(bars).reset_index(drop=True) \
             if live is not None and not live.empty else base
@@ -128,7 +136,15 @@ class CandleStore:
             return None
         completed = builder.frame(include_forming=False)
         if not completed.empty:
-            self.write(symbol, timeframe, completed)
+            # Persist only bars not written yet (was: every bar, every scan).
+            done = self._persisted.get((symbol, timeframe))
+            new = completed if done is None else completed[completed["timestamp"] > done]
+            if not new.empty:
+                self.write(symbol, timeframe, new)
+                self._persisted[(symbol, timeframe)] = new["timestamp"].max()
+                key = (symbol, timeframe)
+                if key in self._mem:
+                    self._mem[key] = splice(self._mem[key], new).tail(2000).reset_index(drop=True)
         frame = builder.frame(include_forming=True)
         return frame if not frame.empty else None
 
@@ -151,6 +167,21 @@ class CandleStore:
         return max(7, int(bars / per_day * 1.8) + 3)
 
     # ------------------------------------------------------------------ #
+    def _cached_read(self, symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
+        key = (symbol, timeframe)
+        mem = self._mem.get(key)
+        # Re-read only when the cache is missing, or short while the database
+        # may hold more (a read that came back short means it holds no more).
+        if mem is None or (len(mem) < bars * 0.9 and key not in self._short):
+            want = max(bars, 500)
+            mem = self.read(symbol, timeframe, want)
+            self._mem[key] = mem
+            if len(mem) < want:
+                self._short.add(key)
+            else:
+                self._short.discard(key)
+        return mem.tail(bars).reset_index(drop=True)
+
     @staticmethod
     def read(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
         with session_scope() as db:
@@ -289,6 +320,8 @@ class CandleStore:
         Pre-market bulk load. Run once before the open so the first scan of the
         day isn't competing with live trading for the rate limit.
         """
+        self._mem.clear()
+        self._short.clear()
         timeframe = timeframe or cfg.TIMEFRAME
         bars = bars or cfg.HISTORY_BARS
         result = {}

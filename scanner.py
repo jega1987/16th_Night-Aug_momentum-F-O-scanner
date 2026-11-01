@@ -61,8 +61,13 @@ class IndexScanner:
             return []
 
         watchlist = self.symbols()
+        import time as _t
+        t0 = _t.monotonic()
+        calls0 = getattr(self.store, "api_calls_made", 0) if self.store else 0
         tasks = [self._scan_symbol(sym, tf) for sym in watchlist]
         outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        self.last_scan_secs = round(_t.monotonic() - t0, 1)
+        self.last_scan_rest = (getattr(self.store, "api_calls_made", 0) if self.store else 0) - calls0
 
         results = []
         for symbol, outcome in zip(watchlist, outcomes):
@@ -79,8 +84,11 @@ class IndexScanner:
             except Exception as exc:
                 logger.debug("[Scanner] Early-alert arming failed: %s", exc)
         self.last_scan_at = now_naive()
-        logger.info("[Scanner] %s scan complete - %d setup(s) from %d symbol(s)",
-                    tf, len(results), len(watchlist))
+        healthy = bool(getattr(self.feed, "stream_healthy", lambda: False)())
+        logger.info("[Scanner] %s scan complete - %d setup(s) from %d symbol(s) in %.1fs "
+                    "(candle REST calls %d, stream %s)",
+                    tf, len(results), len(watchlist), getattr(self, "last_scan_secs", 0.0),
+                    getattr(self, "last_scan_rest", 0), "up" if healthy else "down")
         return results
 
     async def run_cycle(self, timeframe: str = None, force: bool = False) -> List[Dict]:
@@ -385,6 +393,10 @@ class IndexScanner:
 
     async def _live_entry(self, symbol: str, fallback: float) -> float:
         """Live futures price for the entry; the closed bar's close if the quote fails."""
+        sq = getattr(self.feed, "stream_quote", None)
+        sq = sq(symbol, max_age=5.0) if sq else None
+        if sq and sq.get("ltp"):
+            return float(sq["ltp"])            # streamed tick, no REST round trip
         try:
             quote = await self.feed.get_live_quote(symbol, use_futures=True)
             ltp = float(quote.get("ltp") or 0)
