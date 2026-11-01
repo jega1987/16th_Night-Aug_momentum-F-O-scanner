@@ -261,3 +261,91 @@ def atm_strike(spot: float, step: int) -> int:
     if not step:
         return int(round(spot))
     return int(round(spot / step) * step)
+
+
+def breakout_states(q: pd.DataFrame, d5: pd.DataFrame, in_sqz: pd.Series, duration: pd.Series,
+                    min_bars: int, memory_bars: int, valid_bars: int, max_range_bars: int = 20):
+    """
+    First-breakout tracking with coil memory (rules of 1 Nov 2026).
+
+    For every 5-minute bar i (closed), using only data available at its close:
+      - the coil is the latest run of >= min_bars squeeze bars among the
+        15-minute bars COMPLETED BEFORE the 15-minute period that contains
+        bar i. The breakout candle's own 15-minute bar is therefore never part
+        of the range it is breaking (the JUBLFOOD 30-Oct bug);
+      - a coil stays in memory for memory_bars 15-minute bars after its last
+        squeeze bar, so a same-day or multi-day coil can still be broken out
+        of after the bands have widened;
+      - the range (high/low of up to max_range_bars coil bars) is frozen at the
+        first 5-minute close outside it; a close back inside resets it;
+      - the bar is actionable while it is within valid_bars 5-minute bars of
+        that first breakout and still outside the frozen range.
+
+    Returns a DataFrame aligned with d5: side (+1/-1/0), hi, lo, eligible,
+    coil_start (15m index), coil_bars, break_i (5m index of first break),
+    bars_since_break, state ('none'|'compressing'|'inside'|'breakout'|'stale').
+    """
+    n5 = len(d5)
+    out = {"side": np.zeros(n5, dtype=int), "hi": np.full(n5, np.nan), "lo": np.full(n5, np.nan),
+           "eligible": np.zeros(n5, dtype=bool), "coil_start": np.full(n5, -1),
+           "coil_bars": np.zeros(n5, dtype=int), "break_i": np.full(n5, -1),
+           "bars_since_break": np.full(n5, -1), "state": np.array(["none"] * n5, dtype=object)}
+    if n5 == 0 or len(q) == 0:
+        return pd.DataFrame(out)
+    qts = pd.to_datetime(q["timestamp"]).values
+    ts5 = pd.to_datetime(d5["timestamp"])
+    period = ts5.dt.floor("15min").values
+    # number of q bars that START before the 5-minute bar's 15-minute period
+    pos = np.searchsorted(qts, period, side="left")
+    sq = np.asarray(in_sqz, dtype=bool)
+    dur = np.asarray(duration).astype(int)
+    hi_q, lo_q = q["high"].to_numpy(dtype=float), q["low"].to_numpy(dtype=float)
+    # last squeeze bar at or before each q index
+    last_true = np.full(len(q), -1)
+    lt = -1
+    for k in range(len(q)):
+        if sq[k]:
+            lt = k
+        last_true[k] = lt
+    closes = d5["close"].to_numpy(dtype=float)
+    rng_cache = {}
+    cur_key, frozen, first = None, None, None
+    for i in range(n5):
+        k = pos[i] - 1
+        if k < 0:
+            cur_key = None
+            continue
+        e = last_true[k]
+        if e < 0 or dur[e] < min_bars or (k - e) > memory_bars:
+            # a coil still forming shows as 'compressing'
+            if e >= 0 and e == k and dur[e] < min_bars:
+                out["state"][i] = "compressing"
+                out["coil_bars"][i] = dur[e]
+            cur_key, frozen, first = None, None, None
+            continue
+        s = e - dur[e] + 1
+        if (s, e) not in rng_cache:
+            a = max(s, e - max_range_bars + 1)
+            rng_cache[(s, e)] = (float(hi_q[a:e + 1].max()), float(lo_q[a:e + 1].min()))
+        if cur_key != s:                       # a new coil: forget the old breakout
+            cur_key, frozen, first = s, None, None
+        hi, lo = frozen if frozen else rng_cache[(s, e)]
+        c = closes[i]
+        side = 1 if c > hi else (-1 if c < lo else 0)
+        if side == 0:
+            frozen, first = None, None
+            hi, lo = rng_cache[(s, e)]
+            out["state"][i] = "inside"
+        else:
+            if first is None or side != first[1]:
+                frozen, first = (hi, lo), (i, side)
+            since = i - first[0]
+            out["break_i"][i] = first[0]
+            out["bars_since_break"][i] = since
+            out["side"][i] = side
+            ok = since <= valid_bars
+            out["eligible"][i] = ok
+            out["state"][i] = "breakout" if ok else "stale"
+        out["hi"][i], out["lo"][i] = hi, lo
+        out["coil_start"][i], out["coil_bars"][i] = s, dur[e]
+    return pd.DataFrame(out)

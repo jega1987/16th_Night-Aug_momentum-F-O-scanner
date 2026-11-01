@@ -361,6 +361,9 @@ async def warm_up() -> None:
             # Ticks arrive on the WebSocket thread; positions live on this loop.
             loop = asyncio.get_running_loop()
             feed.tick_listener = lambda batch: loop.call_soon_threadsafe(engine.on_ticks, batch)
+        if cfg.EARLY_ALERTS and hasattr(feed, "early_listener"):
+            loop = asyncio.get_running_loop()
+            feed.early_listener = lambda alerts: loop.call_soon_threadsafe(scanner.on_early, alerts)
             if state.feed_connected and MarketClock.is_market_open():
                 await engine.manage_open_positions(feed)   # load + track open trades now
         # Stored token dead and auto-login on? Refresh now rather than waiting

@@ -242,7 +242,7 @@
         <td class="flat" colspan="4" style="text-align:center">no option prices{% if sig.option_ltp %} · premium {{ sig.option_ltp }}{% endif %}</td>
         {% endif %}
         <td class="num">{{ sig.lots or '—' }}</td>
-        <td title="{{ sig.status|status_label }}">{{ sig.status }}{% if sig.manage_basis == 'option' %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">on premium</div>{% endif %}</td>
+        <td title="{{ sig.status|status_label }}">{{ sig.status }}{% if sig.manage_basis == 'option' %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">on premium</div>{% endif %}{% set fbt = sig.factor_breakdown or {} %}{% if fbt.sector_trend == 1 %}<div class="lbl" style="text-transform:none;letter-spacing:.02em;color:var(--long)">sector ✓</div>{% elif fbt.sector_trend == -1 %}<div class="lbl" style="text-transform:none;letter-spacing:.02em;color:var(--short)">sector ✗</div>{% endif %}{% if fbt.adx_low %}<div class="lbl" style="text-transform:none;letter-spacing:.02em;color:var(--hold)">low ADX</div>{% endif %}</td>
         {% set op = sig.opt_pnl if sig.opt_entry else none %}
         {% if op is not none %}
         <td class="num {% if op > 0 %}up{% elif op < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(op) }}</td>
@@ -254,6 +254,10 @@
         <td colspan="11">
           <div class="chips">
             {% if sig.option_hint %}<span class="chip">{{ sig.option_hint }}</span>{% endif %}
+            {% set fbx = sig.factor_breakdown or {} %}
+            {% if fbx.sector_note %}<span class="chip {% if fbx.sector_trend == 1 %}pass{% elif fbx.sector_trend == -1 %}fail{% else %}half{% endif %}">sector: {{ fbx.sector_note }}</span>{% endif %}
+            {% if fbx.adx_low %}<span class="chip half">LOW-ADX {{ fbx.adx_value }}</span>{% endif %}
+            {% if fbx.breakout_at %}<span class="chip">breakout {{ fbx.breakout_at[11:16] }}</span>{% endif %}
             <span class="chip">stock entry {{ '{:,.2f}'.format(sig.entry or 0) }} · stop {{ '{:,.2f}'.format(sig.trail_sl or sig.sl or 0) }} · T {{ '{:,.0f}'.format(sig.tp1 or 0) }} / {{ '{:,.0f}'.format(sig.tp2 or 0) }} / {{ '{:,.0f}'.format(sig.tp3 or 0) }}</span>
             <span class="chip">stock-level p&amp;l {{ '{:+,.0f}'.format(sig.pnl or 0) }}</span>
             <span class="chip">score {{ '{:.2f}'.format(sig.composite_score or 0) }}</span>

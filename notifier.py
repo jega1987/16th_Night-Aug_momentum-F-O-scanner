@@ -48,9 +48,22 @@ class Notifier:
             f"Qty {s['qty']} ({s['lots']} lots)   ATR {s['atr14']}\n"
             f"{self._option_line(s)}"
             f"Score {s['composite_score']:.2f}\n"
+            f"{self._tags_line(s)}"
             f"<i>Paper signal - no order was placed.</i>"
         )
         return await self.send(text)
+
+    @staticmethod
+    def _tags_line(s: Dict) -> str:
+        fb = s.get("factor_breakdown") or {}
+        bits = []
+        if fb.get("sector_note"):
+            bits.append("Sector: " + str(fb["sector_note"]))
+        if fb.get("adx_low"):
+            bits.append(f"LOW-ADX {fb.get('adx_value')}")
+        if fb.get("breakout_at"):
+            bits.append(f"breakout {str(fb['breakout_at'])[11:16]}")
+        return (" | ".join(bits) + "\n") if bits else ""
 
     @staticmethod
     def _option_line(s: Dict) -> str:

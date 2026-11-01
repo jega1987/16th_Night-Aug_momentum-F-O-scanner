@@ -178,10 +178,31 @@ class SymbolBacktest:
         (rolling windows over past bars only), so the full-series result at
         bar j equals what the live scanner computes from the bars up to j.
         """
-        from indicators import compression_setups, squeeze_range
+        from indicators import breakout_states, compression_setups, squeeze_range
         cfg = self.cfg
         if len(self.q15) < cfg.BB_LENGTH + cfg.MIN_SQUEEZE_BARS + 5:
             return []
+        if cfg.BREAKOUT_MODE == "first_break":
+            # Same function the live filter uses, run once over the whole series
+            # (it is causal), so candidates match what apply_all will accept.
+            self._jidx = np.searchsorted(self.q15_done, self.bar_close, side="right") - 1
+            q = self.q15.reset_index(drop=True)
+            elig = np.zeros(len(self.d5), dtype=bool)
+            for _name, in_s, dur_s, _f in compression_setups(q, cfg):
+                st = breakout_states(q, self.d5, in_s.reset_index(drop=True),
+                                     dur_s.reset_index(drop=True), cfg.MIN_SQUEEZE_BARS,
+                                     cfg.COIL_MEMORY_BARS, cfg.BREAKOUT_VALID_BARS,
+                                     cfg.SQUEEZE_RANGE_MAX_BARS)
+                elig |= st["eligible"].to_numpy(dtype=bool)
+            stamps = pd.to_datetime(self.d5["timestamp"])
+            out = []
+            for i in np.flatnonzero(elig):
+                if i >= len(self.d5) - 1 or self._jidx[i] < 0:
+                    continue
+                close_t = (stamps.iloc[i] + pd.Timedelta(minutes=5)).time()
+                if self.sig_start <= close_t <= self.sig_end:
+                    out.append(int(i))
+            return out
         dets = []
         for name, in_s, dur_s, fired_s in compression_setups(self.q15, cfg):
             in_sqz, dur, fired = in_s.values, dur_s.values, fired_s.values
@@ -245,7 +266,8 @@ class SymbolBacktest:
         return (c.volume_mult(self.symbol), c.adx_threshold(self.symbol), c.min_composite(self.symbol),
                 c.RSI_EXHAUSTION_FILTER, c.GAP_FILTER, c.OPEN_VOLUME_BASELINE,
                 c.TRADING_MODE, getattr(c, "SQUEEZE_DETECTOR", "ttm"),
-                getattr(c, "BOX_MAX_WIDTH_ATR", None), getattr(c, "BOX_ATR_BARS", None))
+                getattr(c, "BOX_MAX_WIDTH_ATR", None), getattr(c, "BOX_ATR_BARS", None),
+                c.BREAKOUT_MODE, c.COIL_MEMORY_BARS, c.BREAKOUT_VALID_BARS)
 
     def _evaluate(self, i: int) -> Optional[Dict]:
         key = (i, self._filter_signature())
@@ -623,6 +645,15 @@ def save_trades(engine, trades: List[Dict], run_id: str, label: str) -> None:
 # loaded config for that variant only. BT_* flags exist only in the backtest.
 PRESETS = {
     "base": [("live-rules", {})],
+    # 1-Nov rules: first-break range + coil memory, ADX 18 (stocks and indices).
+    "nov1": [
+        ("old-live", {"BREAKOUT_MODE": "legacy", "EQ_ADX_THRESHOLD": 22.0, "ADX_THRESHOLD": 20.0}),
+        ("first-break-only", {"BREAKOUT_MODE": "first_break", "EQ_ADX_THRESHOLD": 22.0,
+                              "ADX_THRESHOLD": 20.0}),
+        ("adx18-only", {"BREAKOUT_MODE": "legacy", "EQ_ADX_THRESHOLD": 18.0, "ADX_THRESHOLD": 18.0}),
+        ("new-rules", {"BREAKOUT_MODE": "first_break", "EQ_ADX_THRESHOLD": 18.0,
+                       "ADX_THRESHOLD": 18.0}),
+    ],
     # 27-Oct review: trend day (+) vs range day (-). Market-context gates,
     # Supertrend agreement at entry, same-direction clustering, late entries.
     # Risk controls: VIX regime, loss limits, sector cap (plus walk-forward).

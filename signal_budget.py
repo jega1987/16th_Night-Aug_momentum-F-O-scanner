@@ -65,7 +65,7 @@ class SignalBudget:
             return []
         if len(candidates) <= remaining:
             return candidates
-        ranked = sorted(candidates, key=lambda c: -(c.get("composite_score") or 0))
+        ranked = sorted(candidates, key=lambda c: -(c.get("rank_score", c.get("composite_score")) or 0))
         dropped = [c["symbol"] for c in ranked[remaining:]]
         logger.info("[Budget] %d slot(s) left, keeping the top %d by score; deferred: %s",
                     remaining, remaining, ", ".join(dropped))

@@ -101,6 +101,22 @@ class StrategyConfig:
     # price clears it. Measure the breakout level over the most recent
     # stretch of the compression instead.
     SQUEEZE_RANGE_MAX_BARS: int = _int("SQUEEZE_RANGE_MAX_BARS", 20)
+    # Breakout logic (1 Nov 2026). first_break: the range comes from 15-min
+    # coil bars completed before the breakout candle's own 15-min period, a
+    # coil stays in memory COIL_MEMORY_BARS 15-min bars after it ends (same-day
+    # and multi-day), and a breakout is actionable for BREAKOUT_VALID_BARS
+    # 5-min bars after the first close outside. legacy: the old rule.
+    BREAKOUT_MODE: str = os.getenv("BREAKOUT_MODE", "first_break").strip().lower()
+    COIL_MEMORY_BARS: int = _int("COIL_MEMORY_BARS", 26)
+    BREAKOUT_VALID_BARS: int = _int("BREAKOUT_VALID_BARS", 6)
+    # ADX between the threshold and ADX_LOW_TAG is traded but tagged LOW-ADX
+    # and ranked last.
+    ADX_LOW_TAG: float = _float("ADX_LOW_TAG", 20.0)
+    # Sector trend (soft): stock's NSE sector index vs its 15-min EMA20 AND
+    # today's open. Aligned setups rank first; nothing is blocked.
+    SECTOR_TREND: bool = _bool("SECTOR_TREND", True)
+    # Early alert: live price crossing a remembered coil range (no trade).
+    EARLY_ALERTS: bool = _bool("EARLY_ALERTS", True)
     # Which coil detectors count as a setup: "ttm" (Bollinger inside Keltner,
     # the original rule), "box" (tight-range box) or "either" (TTM first,
     # then the box). The box is a run of >= MIN_SQUEEZE_BARS bars whose
