@@ -72,6 +72,13 @@ async def connect_feed() -> bool:
 async def job_scan():
     if not state.feed_connected and not await connect_feed():
         return
+    # Fast path: tick-built bars are final at the 5-min mark. Without a
+    # healthy stream, wait until Kite has published the bar (REST path).
+    healthy = bool(getattr(feed, "stream_healthy", lambda: False)())
+    if not healthy:
+        wait = max(0, cfg.SCAN_REST_SECOND - now_naive().second)
+        if wait:
+            await asyncio.sleep(wait)
     try:
         created = await scanner.run_cycle()
         state.last_scan_at = now_naive()
@@ -291,7 +298,7 @@ async def job_reconnect():
 def register_jobs():
     # Scans fire 20s after each 5-minute boundary so the candle has closed and
     # the broker has published it.
-    scheduler.add_job(job_scan, CronTrigger(minute="*/5", second=20, timezone=IST),
+    scheduler.add_job(job_scan, CronTrigger(minute="*/5", second=cfg.SCAN_FAST_SECOND, timezone=IST),
                       id="scan", replace_existing=True, max_instances=1, misfire_grace_time=60)
     scheduler.add_job(job_manage_positions, "interval", minutes=1,
                       id="manage", replace_existing=True, max_instances=1, misfire_grace_time=30)

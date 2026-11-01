@@ -414,7 +414,22 @@ class KiteFeed(MarketFeed):
                              symbol, exc, age or -1, cfg.QUOTE_CACHE_MAX_AGE_SECONDS)
             raise
 
+    def stream_quote(self, symbol: str, max_age: float = 5.0) -> Optional[Dict]:
+        """Last streamed price/OI for a symbol, if a tick arrived within max_age seconds."""
+        st = self.stream
+        if not (st and st.connected) or symbol not in st.ltp:
+            return None
+        at = st.ltp_at.get(symbol)
+        if at is None or (now_naive() - at).total_seconds() > max_age:
+            return None
+        return {"ltp": st.ltp[symbol], "oi": st.oi.get(symbol), "stale": False, "source": "stream"}
+
     async def get_oi(self, symbol: str) -> Optional[float]:
+        # The stream (QUOTE mode) carries OI on every tick: no REST call needed.
+        sq = self.stream_quote(symbol, max_age=60.0)
+        if sq and sq.get("oi"):
+            self.rest_saved = getattr(self, "rest_saved", 0) + 1
+            return float(sq["oi"])
         try:
             quote = await self.get_live_quote(symbol, use_futures=True)
             oi = float(quote.get("oi") or 0)
@@ -715,6 +730,7 @@ class KiteTickStream:
         self.minutes = minutes
         self.builders = {sym: BarBuilder(sym, minutes) for sym in token_map}
         self.ltp: Dict[str, float] = {}
+        self.ltp_at: Dict[str, datetime] = {}
         self.oi: Dict[str, float] = {}
         self.connected = False
         self.subscribed = False
@@ -860,6 +876,7 @@ class KiteTickStream:
                     continue
                 self.tick_count += 1
                 self.ltp[symbol] = price
+                self.ltp_at[symbol] = stamp
                 if tick.get("oi") is not None:
                     self.oi[symbol] = float(tick["oi"])
                 # volume_traded is cumulative for the day; BarBuilder converts
@@ -868,6 +885,10 @@ class KiteTickStream:
                 ts = tick.get("exchange_timestamp") or tick.get("last_trade_time") or stamp
                 if isinstance(ts, datetime) and ts.tzinfo is not None:
                     ts = ts.replace(tzinfo=None)
+                # KiteTicker converts exchange timestamps with the container's
+                # clock (UTC on Railway); never let that shift a bar by 5.5 h.
+                if not isinstance(ts, datetime) or abs((ts - stamp).total_seconds()) > 300:
+                    ts = stamp
                 builder = self.builders.get(symbol)
                 if builder:
                     builder.add_tick(price, float(cum_volume) if cum_volume is not None else None, ts)
