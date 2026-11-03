@@ -70,6 +70,11 @@ class CandleStore:
         self._mem: Dict = {}
         self._persisted: Dict = {}
         self._short = set()
+        # Scan speed (3 Nov 2026): while a scan runs, newly completed stream
+        # bars are queued and written in ONE database session at the end
+        # (was: one session with several round trips per stock per scan).
+        self._defer = False
+        self._pending: List = []
 
     # ------------------------------------------------------------------ #
     async def get(self, symbol: str, timeframe: str, bars: int,
@@ -140,13 +145,86 @@ class CandleStore:
             done = self._persisted.get((symbol, timeframe))
             new = completed if done is None else completed[completed["timestamp"] > done]
             if not new.empty:
-                self.write(symbol, timeframe, new)
+                if self._defer:
+                    self._pending.append((symbol, timeframe, new.copy()))
+                else:
+                    self.write(symbol, timeframe, new)
                 self._persisted[(symbol, timeframe)] = new["timestamp"].max()
                 key = (symbol, timeframe)
                 if key in self._mem:
                     self._mem[key] = splice(self._mem[key], new).tail(2000).reset_index(drop=True)
         frame = builder.frame(include_forming=True)
         return frame if not frame.empty else None
+
+    def defer_writes(self, on: bool) -> None:
+        self._defer = bool(on)
+
+    def flush(self) -> int:
+        """Write every queued stream bar in a single session. Returns rows inserted."""
+        items, self._pending = self._pending, []
+        if not items:
+            return 0
+        try:
+            return self._write_many(items)
+        except Exception as exc:
+            # Fall back to the per-symbol path (handles the constraint-clash wipe).
+            logger.warning("[Store] Batch write failed (%s) - writing per symbol",
+                           str(exc).splitlines()[0][:120])
+            n = 0
+            for sym, tf, df in items:
+                try:
+                    n += self.write(sym, tf, df)
+                except Exception as exc2:
+                    logger.error("[Store] %s %s write failed: %s", sym, tf, exc2)
+            return n
+
+    @staticmethod
+    def _write_many(items) -> int:
+        frames = []
+        for sym, tf, df in items:
+            df = session_only(df)
+            if df is None or df.empty:
+                continue
+            df = df.copy()
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            try:
+                df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+            except TypeError:
+                pass
+            frames.append((sym, tf, df))
+        if not frames:
+            return 0
+        written = 0
+        tmin = min(df["timestamp"].min() for _s, _t, df in frames).to_pydatetime()
+        syms = sorted({s for s, _t, _d in frames})
+        tfs = sorted({t for _s, t, _d in frames})
+        with session_scope() as db:
+            existing = {
+                (r[0], r[1], r[2]) for r in
+                db.query(Candle.symbol, Candle.timeframe, Candle.timestamp)
+                  .filter(Candle.symbol.in_(syms), Candle.timeframe.in_(tfs),
+                          Candle.timestamp >= tmin).all()
+            }
+            new_rows = []
+            for sym, tf, df in frames:
+                for row in df.itertuples(index=False):
+                    ts = pd.Timestamp(row.timestamp).to_pydatetime()
+                    vals = {"open": float(row.open), "high": float(row.high),
+                            "low": float(row.low), "close": float(row.close),
+                            "volume": float(row.volume)}
+                    if (sym, tf, ts) in existing:
+                        (db.query(Candle)
+                           .filter(and_(Candle.symbol == sym, Candle.timeframe == tf,
+                                        Candle.timestamp == ts))
+                           .update(vals, synchronize_session=False))
+                    else:
+                        existing.add((sym, tf, ts))
+                        new_rows.append(dict(symbol=sym, timeframe=tf, timestamp=ts, **vals))
+            if new_rows:
+                from sqlalchemy import insert
+                db.execute(insert(Candle), new_rows)      # one executemany
+                written = len(new_rows)
+        return written
 
     def _needs_refresh(self, last_ts, timeframe: str) -> bool:
         """A closed bar is final. Only fetch when a new one should exist."""
