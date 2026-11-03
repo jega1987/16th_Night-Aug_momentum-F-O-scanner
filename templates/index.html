@@ -296,6 +296,24 @@
 </section>
 
 <section>
+  <div class="shead"><span class="lbl">early alerts today</span><span class="lbl">live price crossed a squeeze range - not a signal; the 5-min close and checks decide</span><div class="spacer"></div><button class="btn" type="button" id="earlyToggle">{% if early_alerts %}Show ({{ early_alerts|length }}) ▾{% else %}none yet{% endif %}</button></div>
+  <div id="earlyPanel" hidden>
+  {% if early_alerts %}
+  <div class="scroll"><table>
+    <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Live price</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for e in early_alerts %}
+      <tr><td class="num">{{ e.time }}</td><td>{{ e.symbol }}</td>
+        <td><span class="tag" style="color:{{ 'var(--long)' if e.side=='CALL' else 'var(--short)' }}">{{ e.side }}</span></td>
+        <td class="num">{{ '{:,.2f}'.format(e.price) if e.price else '—' }}</td>
+        <td class="flat" style="font-size:12px">{{ e.text }}</td></tr>
+    {% endfor %}
+    </tbody></table></div>
+  {% endif %}
+  </div>
+</section>
+
+<section>
   <form class="shead" method="get">
     <span class="lbl">scan log</span>
     <span class="lbl">why each symbol did or didn't qualify, factor by factor</span>
@@ -407,6 +425,10 @@
   setInterval(() => { if (!expanded && document.visibilityState === 'visible') location.reload(); }, 45000);
 </script>
 <script>
+(function(){
+  var b=document.getElementById('earlyToggle'), p=document.getElementById('earlyPanel');
+  if(b && p) b.addEventListener('click', function(){ p.hidden=!p.hidden; });
+})();
 (function(){
   var k=document.getElementById('kill'); if(!k) return;
   k.addEventListener('click', function(){

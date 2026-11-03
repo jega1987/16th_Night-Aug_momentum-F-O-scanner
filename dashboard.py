@@ -247,6 +247,7 @@ async def dashboard(request: Request,
         "budget": budget_status,
         "live": _live_status(),
         "fo_ban": _ban_list(),
+        "early_alerts": _early_alerts(),
         "watchlist_size": watchlist_size,
         "total_signals": len(today_signals),
         "open_signals": len([s for s in today_signals if s.status in OPEN_STATES]),
@@ -295,6 +296,25 @@ async def api_equity(tf: str = Query(default=None), db: Session = Depends(get_db
         running += r.pnl or 0
         curve.append({"time": r.timestamp.strftime("%d-%m %H:%M"), "pnl": round(running, 2)})
     return curve
+
+
+def _early_alerts(limit: int = 60) -> list:
+    """Today's early (tick-level) breakout alerts, newest first."""
+    try:
+        from database import session_scope
+        from clock import today_start
+        with session_scope() as db:
+            rows = (db.query(ScanLog)
+                      .filter(ScanLog.timestamp >= today_start(),
+                              ScanLog.rejection_reason.like("EARLY %"))
+                      .order_by(ScanLog.timestamp.desc()).limit(limit).all())
+            return [{"time": r.timestamp.strftime("%H:%M:%S"), "symbol": r.symbol,
+                     "side": "CALL" if (r.rejection_reason or "").startswith("EARLY CALL") else "PUT",
+                     "price": r.close,
+                     "level": (r.factors or {}).get("level") if isinstance(r.factors, dict) else None,
+                     "text": r.rejection_reason} for r in rows]
+    except Exception:
+        return []
 
 
 def _ban_list() -> list:
