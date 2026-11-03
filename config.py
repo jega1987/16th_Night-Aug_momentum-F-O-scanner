@@ -116,7 +116,7 @@ class StrategyConfig:
     # today's open. Aligned setups rank first; nothing is blocked.
     SECTOR_TREND: bool = _bool("SECTOR_TREND", True)
     # Early alert: live price crossing a remembered coil range (no trade).
-    EARLY_ALERTS: bool = _bool("EARLY_ALERTS", True)
+    EARLY_ALERTS: bool = _bool("EARLY_ALERTS", False)          # user 3 Nov: not needed
     # Early alerts go to the log, scan log and Redis events; Telegram only if on
     # (user 3 Nov: off).
     EARLY_ALERT_TELEGRAM: bool = _bool("EARLY_ALERT_TELEGRAM", False)
