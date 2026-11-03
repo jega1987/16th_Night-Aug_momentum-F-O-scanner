@@ -85,6 +85,16 @@ class IndexScanner:
                 logger.debug("[Scanner] Early-alert arming failed: %s", exc)
         self.last_scan_at = now_naive()
         healthy = bool(getattr(self.feed, "stream_healthy", lambda: False)())
+        try:
+            import livestate
+            summary = {"at": now_naive().isoformat(timespec="seconds"), "tf": tf,
+                       "setups": len(results), "symbols": len(watchlist),
+                       "secs": getattr(self, "last_scan_secs", 0.0),
+                       "rest_calls": getattr(self, "last_scan_rest", 0), "stream": healthy}
+            livestate.scan_summary(summary)
+            livestate.heartbeat({"last_scan": summary["at"], "scan_secs": summary["secs"]})
+        except Exception as exc:
+            logger.debug("[Redis] scan summary skipped: %s", exc)
         logger.info("[Scanner] %s scan complete - %d setup(s) from %d symbol(s) in %.1fs "
                     "(candle REST calls %d, stream %s)",
                     tf, len(results), len(watchlist), getattr(self, "last_scan_secs", 0.0),
@@ -124,6 +134,16 @@ class IndexScanner:
                     logger.info("[Scanner] %s %s rank %.2f | %s%s", st["symbol"], st["direction"],
                                 st["rank_score"], m.get("sector_note") or "",
                                 " | LOW-ADX" if m.get("adx_low") else "")
+
+        # Kill switch (Redis): no new signals while it is on.
+        if setups:
+            import livestate
+            if livestate.kill_switch_on():
+                logger.warning("[Scanner] Kill switch ON - %d setup(s) not recorded", len(setups))
+                for st in setups:
+                    self._log_scan(st["symbol"], st["timeframe"], st.get("meta", {}), passed=False,
+                                   reason="Kill switch on", composite=st.get("composite_score"))
+                setups = []
 
         # Strict cap: trim to what the budget allows, best ranked first.
         if self.budget:
@@ -499,12 +519,17 @@ class IndexScanner:
             if key in self._early_sent:
                 continue
             self._early_sent.add(key)
+            import livestate
+            if livestate.early_seen(f"{a['symbol']}|{a['side']}|{key[2]}|{key[3]}"):
+                continue                       # already sent before a restart
             side = "CALL" if a["side"] > 0 else "PUT"
             level = a["hi"] if a["side"] > 0 else a["lo"]
             msg = (f"EARLY {side} {a['symbol']}: live {a['price']:.2f} crossed the squeeze "
                    f"{'high' if a['side'] > 0 else 'low'} {level:.2f} - waiting for the 5-min close "
                    f"and checks")
             logger.info("[Early] %s", msg)
+            livestate.publish("early", {"symbol": a["symbol"], "side": side, "price": a["price"],
+                                        "level": level})
             self._log_scan(a["symbol"], cfg.TIMEFRAME,
                            {"squeeze_high": a["hi"], "squeeze_low": a["lo"], "close": a["price"],
                             "coil_state": "early"},

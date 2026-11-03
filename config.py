@@ -429,6 +429,8 @@ class StrategyConfig:
 
     # ---------- websocket streaming ----------
     USE_WEBSOCKET: bool = _bool("USE_WEBSOCKET", True)
+    # Redis live state (optional; empty = off). Railway: ${{Redis.REDIS_URL}}
+    REDIS_URL: str = os.getenv("REDIS_URL", "").strip()
     # Scan start, seconds after each 5-min mark. With a healthy stream the
     # bar is built from ticks and is final at the mark, so the scan starts at
     # SCAN_FAST_SECOND; otherwise it waits for Kite to publish (SCAN_REST_SECOND).

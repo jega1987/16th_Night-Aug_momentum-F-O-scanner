@@ -124,6 +124,11 @@
   <div class="spacer"></div>
   <span class="pill {% if budget.remaining == 0 %}off{% elif budget.remaining <= 2 %}warn{% endif %}">{{ budget.used }}/{{ budget.cap }} signals</span>
   <span class="lbl">scanned {{ last_scan }}</span>
+  {% if live and live.redis %}
+    {% set w = live.worker %}{% set ls = live.last_scan %}
+    <span class="pill {% if w %}live{% else %}off{% endif %}" title="Redis live state">{% if w %}worker live{% else %}worker off{% endif %}{% if ls %} · scan {{ ls.at[11:19] }} in {{ ls.secs }}s{% endif %}</span>
+    <button class="btn" id="kill" data-on="{{ 'false' if live.kill_switch else 'true' }}" style="{% if live.kill_switch %}color:var(--short);border-color:var(--short){% endif %}">{% if live.kill_switch %}KILL SWITCH ON - resume{% else %}Kill switch{% endif %}</button>
+  {% endif %}
   <a class="btn {% if timeframe=='5m' %}on{% endif %}" href="?tf=5m{% if token %}&token={{ token }}{% endif %}">5m</a>
   <a class="btn {% if timeframe=='15m' %}on{% endif %}" href="?tf=15m{% if token %}&token={{ token }}{% endif %}">15m</a>
   <a class="btn" href="/pnl{% if token %}?token={{ token }}{% endif %}">Signals &amp; P&amp;L</a>
@@ -399,6 +404,19 @@
 
   // Refresh while the market is moving, but never mid-read.
   setInterval(() => { if (!expanded && document.visibilityState === 'visible') location.reload(); }, 45000);
+</script>
+<script>
+(function(){
+  var k=document.getElementById('kill'); if(!k) return;
+  k.addEventListener('click', function(){
+    var on=k.getAttribute('data-on')==='true';
+    if(on && !confirm('Stop all new signals now?')) return;
+    var t=new URLSearchParams(location.search).get('token');
+    fetch('/api/kill?on='+on+(t?'&token='+encodeURIComponent(t):''),{method:'POST'})
+      .then(function(r){ if(!r.ok) throw new Error(r.status); location.reload(); })
+      .catch(function(e){ alert('Kill switch not changed: '+e.message); });
+  });
+})();
 </script>
 </body>
 </html>
