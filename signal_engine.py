@@ -173,6 +173,14 @@ class SignalEngine:
 
     # ------------------------------------------------------------------ #
     async def create_signal(self, setup: Dict) -> Optional[Dict]:
+        # One signal per symbol, direction and bar, even if two workers overlap
+        # during a deploy (Redis lock; always granted without Redis).
+        import livestate
+        bar = (setup.get("meta") or {}).get("bar_time") or str(setup.get("timestamp") or "")
+        if not livestate.acquire(f"signal:{setup['symbol']}:{setup['direction']}:{bar}", 3600):
+            logger.warning("[Engine] %s %s for bar %s already recorded by another process - skipped",
+                           setup["symbol"], setup["direction"], bar)
+            return None
         levels = self.calculate_levels(setup)
         if not levels:
             return None
@@ -267,6 +275,13 @@ class SignalEngine:
                     payload["option_hint"],
                     f" | OPTION BLOCKED: {plan.block_reason}" if plan and plan.blocked else "")
 
+        try:
+            livestate.publish("signal", {"id": payload.get("id"), "symbol": payload["symbol"],
+                                         "direction": payload["direction"], "entry": payload["entry"],
+                                         "opt_entry": payload.get("opt_entry"),
+                                         "option": payload.get("option_hint")})
+        except Exception:
+            pass
         try:
             self.after_new_signal()
         except Exception as exc:
@@ -484,6 +499,12 @@ class SignalEngine:
 
     def _persist(self, s: Dict) -> None:
         import time as _t
+        try:
+            import livestate
+            if s.get("status") in OPEN_STATUSES:
+                livestate.put_position(s)
+        except Exception:
+            pass
         with session_scope() as db:
             row = db.get(Signal, s["id"])
             if row:
@@ -679,6 +700,15 @@ class SignalEngine:
         for s in updates:
             if s["status"] in CLOSED_STATUSES:
                 self._pos.pop(s["id"], None)
+                try:
+                    import livestate
+                    livestate.drop_position(s["id"])
+                    livestate.publish("exit", {"id": s["id"], "symbol": s["symbol"],
+                                               "status": s["status"], "pnl": s.get("pnl"),
+                                               "opt_pnl": s.get("opt_pnl"),
+                                               "opt_exit": s.get("opt_exit")})
+                except Exception:
+                    pass
                 logger.info("[Engine] %s #%s closed %s | stock %.2f | option %s | P&L stock %+.0f, "
                             "option %s", s["symbol"], s["id"], s["status"], s.get("exit_price") or 0,
                             s.get("opt_exit"), s.get("pnl") or 0,

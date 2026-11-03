@@ -93,6 +93,12 @@ async def job_scan():
 
 
 async def job_manage_positions():
+    try:
+        import livestate
+        livestate.heartbeat({"feed": state.feed_connected,
+                             "stream": bool(getattr(feed, "stream_healthy", lambda: False)())})
+    except Exception:
+        pass
     if not state.feed_connected or not MarketClock.is_market_open():
         return
     try:

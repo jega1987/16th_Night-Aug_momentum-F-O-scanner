@@ -245,6 +245,7 @@ async def dashboard(request: Request,
         "missing_vars": cfg.missing_credentials(),
         "last_scan": state.last_scan_at.strftime("%H:%M:%S") if state.last_scan_at else "not yet",
         "budget": budget_status,
+        "live": _live_status(),
         "watchlist_size": watchlist_size,
         "total_signals": len(today_signals),
         "open_signals": len([s for s in today_signals if s.status in OPEN_STATES]),
@@ -293,6 +294,32 @@ async def api_equity(tf: str = Query(default=None), db: Session = Depends(get_db
         running += r.pnl or 0
         curve.append({"time": r.timestamp.strftime("%d-%m %H:%M"), "pnl": round(running, 2)})
     return curve
+
+
+def _live_status() -> dict:
+    try:
+        import livestate
+        return livestate.status()
+    except Exception:
+        return {"redis": False}
+
+
+@app.get("/api/live")
+async def api_live(_=Depends(require_token)):
+    """Redis live state: worker heartbeat, last scan, open positions, recent events."""
+    import livestate
+    return {"status": livestate.status(), "positions": livestate.positions(),
+            "events": livestate.recent_events(50)}
+
+
+@app.post("/api/kill")
+async def api_kill(on: bool = Query(...), request: Request = None, _=Depends(require_token)):
+    """Kill switch: on=true stops new signals (and, later, new orders) at once."""
+    import livestate
+    ok = livestate.set_kill_switch(on, who="dashboard")
+    if not ok:
+        raise HTTPException(status_code=503, detail="Redis unavailable - kill switch not changed")
+    return {"ok": True, "kill_switch": on}
 
 
 @app.get("/api/stats")
