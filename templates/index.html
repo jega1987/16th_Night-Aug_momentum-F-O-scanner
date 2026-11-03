@@ -124,6 +124,7 @@
   <div class="spacer"></div>
   <span class="pill {% if budget.remaining == 0 %}off{% elif budget.remaining <= 2 %}warn{% endif %}">{{ budget.used }}/{{ budget.cap }} signals</span>
   <span class="lbl">scanned {{ last_scan }}</span>
+  {% if fo_ban %}<span class="pill warn" title="No new signals today: {{ fo_ban|join(', ') }}">F&amp;O ban: {{ fo_ban|length }}</span>{% endif %}
   {% if live and live.redis %}
     {% set w = live.worker %}{% set ls = live.last_scan %}
     <span class="pill {% if w %}live{% else %}off{% endif %}" title="Redis live state">{% if w %}worker live{% else %}worker off{% endif %}{% if ls %} · scan {{ ls.at[11:19] }} in {{ ls.secs }}s{% endif %}</span>

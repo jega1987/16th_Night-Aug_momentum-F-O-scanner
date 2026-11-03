@@ -10,7 +10,7 @@ import logging
 import os
 from contextlib import contextmanager
 
-from sqlalchemy import (JSON, Boolean, Column, DateTime, Float, Index, Integer,
+from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, Index, Integer,
                         String, UniqueConstraint, create_engine, text)
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -334,6 +334,15 @@ class WatchSignal(Base):
     exit_price = Column(Float)
     exit_time = Column(DateTime)
     checked_at = Column(DateTime)
+
+
+class FoBan(Base):
+    """NSE F&O ban list per trade date (banlist.py)."""
+    __tablename__ = "fo_ban"
+    id = Column(Integer, primary_key=True)
+    trade_date = Column(Date, index=True)
+    symbol = Column(String, index=True)
+    updated_at = Column(DateTime, default=now_naive)
 
 
 class SectorMap(Base):

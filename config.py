@@ -353,6 +353,9 @@ class StrategyConfig:
     # At most this many open positions in one NSE industry and direction
     # (sectors.py). 0 = off.
     SECTOR_MAX_OPEN: int = _int("SECTOR_MAX_OPEN", 2)
+    # F&O ban list (NSE "Securities in Ban Period"): no new signal on a banned stock.
+    FO_BAN_FILTER: bool = _bool("FO_BAN_FILTER", True)
+    FO_BAN_URL: str = os.getenv("FO_BAN_URL", "https://nsearchives.nseindia.com/content/fo/fo_secban.csv")
     SECTOR_SOURCE_URL: str = os.getenv(
         "SECTOR_SOURCE_URL", "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv")
     # ---------- data retention (retention.py, daily after the close) ----------

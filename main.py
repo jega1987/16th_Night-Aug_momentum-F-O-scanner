@@ -202,6 +202,15 @@ async def job_sectors():
         logger.warning("[Sectors] Refresh failed: %s", exc)
 
 
+async def job_banlist():
+    """NSE F&O ban list for today (banlist.py)."""
+    try:
+        import banlist
+        await asyncio.to_thread(banlist.refresh)
+    except Exception as exc:
+        logger.warning("[Ban] Refresh failed: %s", exc)
+
+
 async def job_retention():
     """Daily housekeeping after the close (see retention.py)."""
     try:
@@ -341,6 +350,10 @@ def register_jobs():
     scheduler.add_job(job_sectors,
                       CronTrigger(day_of_week="mon-fri", hour=8, minute=20, timezone=IST),
                       id="sectors", replace_existing=True)
+    scheduler.add_job(job_banlist,
+                      CronTrigger(day_of_week="mon-fri", hour="8,9,10,11,12,13,14", minute=15,
+                                  timezone=IST),
+                      id="banlist", replace_existing=True)
     scheduler.add_job(job_retention,
                       CronTrigger(day_of_week="mon-fri", hour=17, minute=30, timezone=IST),
                       id="retention", replace_existing=True)
@@ -392,6 +405,10 @@ async def warm_up() -> None:
             import sectors
             if not sectors.load():
                 await job_sectors()         # first run - no map stored yet
+        if cfg.RUN_SCHEDULER and cfg.FO_BAN_FILTER:
+            import banlist
+            if not banlist.has_today():
+                await job_banlist()         # boot after 08:15 - don't trade a banned stock
         if cfg.RUN_SCHEDULER:
             await job_manage_stream()       # boot mid-session: don't wait a minute
         if state.feed_connected and MarketClock.is_market_open():

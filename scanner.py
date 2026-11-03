@@ -61,6 +61,20 @@ class IndexScanner:
             return []
 
         watchlist = self.symbols()
+        # F&O ban: no new positions allowed, so don't scan those stocks at all.
+        try:
+            import banlist
+            banned = [s for s in watchlist if banlist.is_banned(s)]
+        except Exception:
+            banned = []
+        if banned:
+            watchlist = [s for s in watchlist if s not in banned]
+            for sym in banned:
+                self._log_scan(sym, tf, {}, passed=False, reason="In F&O ban period - no new positions")
+            if not getattr(self, "_ban_logged", None) == (now_naive().date(), tuple(sorted(banned))):
+                self._ban_logged = (now_naive().date(), tuple(sorted(banned)))
+                logger.info("[Ban] Not scanning %d stock(s) in F&O ban: %s", len(banned),
+                            ", ".join(sorted(banned)))
         import time as _t
         t0 = _t.monotonic()
         calls0 = getattr(self.store, "api_calls_made", 0) if self.store else 0
@@ -134,6 +148,19 @@ class IndexScanner:
                     logger.info("[Scanner] %s %s rank %.2f | %s%s", st["symbol"], st["direction"],
                                 st["rank_score"], m.get("sector_note") or "",
                                 " | LOW-ADX" if m.get("adx_low") else "")
+
+        # F&O ban safety net (list may have been refreshed mid-scan).
+        if setups:
+            import banlist
+            keep = []
+            for st in setups:
+                if banlist.is_banned(st["symbol"]):
+                    self._log_scan(st["symbol"], st["timeframe"], st.get("meta", {}), passed=False,
+                                   reason="In F&O ban period - no new positions",
+                                   composite=st.get("composite_score"))
+                else:
+                    keep.append(st)
+            setups = keep
 
         # Kill switch (Redis): no new signals while it is on.
         if setups:
