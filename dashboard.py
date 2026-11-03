@@ -246,6 +246,7 @@ async def dashboard(request: Request,
         "last_scan": state.last_scan_at.strftime("%H:%M:%S") if state.last_scan_at else "not yet",
         "budget": budget_status,
         "live": _live_status(),
+        "fo_ban": _ban_list(),
         "watchlist_size": watchlist_size,
         "total_signals": len(today_signals),
         "open_signals": len([s for s in today_signals if s.status in OPEN_STATES]),
@@ -294,6 +295,14 @@ async def api_equity(tf: str = Query(default=None), db: Session = Depends(get_db
         running += r.pnl or 0
         curve.append({"time": r.timestamp.strftime("%d-%m %H:%M"), "pnl": round(running, 2)})
     return curve
+
+
+def _ban_list() -> list:
+    try:
+        import banlist
+        return sorted(banlist.banned_today())
+    except Exception:
+        return []
 
 
 def _live_status() -> dict:
