@@ -262,7 +262,18 @@ async def job_market_open_alert():
         return
     try:
         snapshots = await scanner.get_index_snapshots()
-        await notifier.send_market_open(snapshots)
+        radar = None
+        try:
+            import banlist
+            symbols = scanner.symbols()
+            banned = sorted(banlist.banned_today()) if cfg.FO_BAN_FILTER else []
+            live = [x for x in symbols if x not in set(banned)]
+            radar = {"banned": banned, "ban_known": banlist.has_today(),
+                     "indices": len([x for x in live if cfg.is_index(x)]),
+                     "stocks": len([x for x in live if not cfg.is_index(x)])}
+        except Exception as exc:
+            logger.warning("[MarketOpen] Radar summary unavailable: %s", exc)
+        await notifier.send_market_open(snapshots, radar)
         state.market_open_alert_date = today
     except Exception as exc:
         logger.error("[MarketOpen] Alert failed: %s", exc)

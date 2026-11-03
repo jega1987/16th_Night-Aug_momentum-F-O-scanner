@@ -117,6 +117,9 @@ class StrategyConfig:
     SECTOR_TREND: bool = _bool("SECTOR_TREND", True)
     # Early alert: live price crossing a remembered coil range (no trade).
     EARLY_ALERTS: bool = _bool("EARLY_ALERTS", True)
+    # Early alerts go to the log, scan log and Redis events; Telegram only if on
+    # (user 3 Nov: off).
+    EARLY_ALERT_TELEGRAM: bool = _bool("EARLY_ALERT_TELEGRAM", False)
     # Which coil detectors count as a setup: "ttm" (Bollinger inside Keltner,
     # the original rule), "box" (tight-range box) or "either" (TTM first,
     # then the box). The box is a run of >= MIN_SQUEEZE_BARS bars whose

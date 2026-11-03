@@ -561,7 +561,7 @@ class IndexScanner:
                            {"squeeze_high": a["hi"], "squeeze_low": a["lo"], "close": a["price"],
                             "coil_state": "early"},
                            passed=False, reason=msg)
-            if self.notifier:
+            if self.notifier and cfg.EARLY_ALERT_TELEGRAM:
                 try:
                     asyncio.ensure_future(self.notifier.send("⚡ " + msg))
                 except Exception as exc:
