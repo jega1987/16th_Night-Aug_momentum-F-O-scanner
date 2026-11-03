@@ -38,6 +38,13 @@ class IndexScanner:
         self.last_error: Optional[str] = None
         self._armed: Dict[str, tuple] = {}
         self.notifier = getattr(engine, "notifier", None)
+        # Scan speed (3 Nov 2026): during a scan, scan-log rows are collected
+        # here and written in one batch at the end instead of one database
+        # round trip per stock; the opening-volume baseline is cached per
+        # stock / slot / day (it only uses earlier sessions).
+        self._log_buf: Optional[list] = None
+        self._baseline_cache: Dict = {}
+        self.last_scan_timing: Dict = {}
 
     # ------------------------------------------------------------------ #
     def symbols(self) -> List[str]:
@@ -78,10 +85,30 @@ class IndexScanner:
         import time as _t
         t0 = _t.monotonic()
         calls0 = getattr(self.store, "api_calls_made", 0) if self.store else 0
-        tasks = [self._scan_symbol(sym, tf) for sym in watchlist]
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        self._log_buf = []
+        if self.store and hasattr(self.store, "defer_writes"):
+            self.store.defer_writes(True)
+        try:
+            tasks = [self._scan_symbol(sym, tf) for sym in watchlist]
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            t_compute = _t.monotonic() - t0
+        finally:
+            t1 = _t.monotonic()
+            buf, self._log_buf = self._log_buf, None
+            flushed = 0
+            if self.store and hasattr(self.store, "defer_writes"):
+                try:
+                    flushed = await asyncio.to_thread(self.store.flush)
+                except Exception as exc:
+                    logger.error("[Scanner] Candle flush failed: %s", exc)
+                self.store.defer_writes(False)
+            if buf:
+                await asyncio.to_thread(self._write_scan_logs, buf)
+            t_db = _t.monotonic() - t1
         self.last_scan_secs = round(_t.monotonic() - t0, 1)
         self.last_scan_rest = (getattr(self.store, "api_calls_made", 0) if self.store else 0) - calls0
+        self.last_scan_timing = {"compute": round(t_compute, 1), "db": round(t_db, 1),
+                                 "logs": len(buf or []), "bars_written": flushed}
 
         results = []
         for symbol, outcome in zip(watchlist, outcomes):
@@ -109,9 +136,11 @@ class IndexScanner:
             livestate.heartbeat({"last_scan": summary["at"], "scan_secs": summary["secs"]})
         except Exception as exc:
             logger.debug("[Redis] scan summary skipped: %s", exc)
+        tm = self.last_scan_timing or {}
         logger.info("[Scanner] %s scan complete - %d setup(s) from %d symbol(s) in %.1fs "
-                    "(candle REST calls %d, stream %s)",
+                    "(checks %.1fs, db write %.1fs, candle REST calls %d, stream %s)",
                     tf, len(results), len(watchlist), getattr(self, "last_scan_secs", 0.0),
+                    tm.get("compute", 0.0), tm.get("db", 0.0),
                     getattr(self, "last_scan_rest", 0), "up" if healthy else "down")
         return results
 
@@ -517,6 +546,16 @@ class IndexScanner:
         hh, mm = (int(x) for x in cfg.OPEN_BASELINE_UNTIL.split(":")[:2])
         if (ts.hour, ts.minute) >= (hh, mm):
             return None
+        key = (symbol, timeframe, ts.date(), ts.hour, ts.minute)
+        if key in self._baseline_cache:
+            return self._baseline_cache[key]
+        if len(self._baseline_cache) > 5000:
+            self._baseline_cache.clear()
+        val = self._opening_volume_baseline_read(symbol, timeframe, ts)
+        self._baseline_cache[key] = val
+        return val
+
+    def _opening_volume_baseline_read(self, symbol: str, timeframe: str, ts) -> Optional[float]:
         try:
             hist = self.store.read(symbol, timeframe, 75 * (cfg.OPEN_BASELINE_DAYS + 2))
         except Exception as exc:
@@ -659,31 +698,42 @@ class IndexScanner:
         # The daily cap is owned by SignalBudget - see run_cycle().
         return None
 
-    @staticmethod
-    def _log_scan(symbol: str, timeframe: str, meta: Dict, passed: bool,
+    def _log_scan(self, symbol: str, timeframe: str, meta: Dict, passed: bool,
                   reason: str, composite: float = None,
                   factors: Optional[Dict] = None) -> None:
+        row = dict(
+            symbol=symbol, timeframe=timeframe,
+            in_squeeze=bool(meta.get("in_squeeze", False)),
+            squeeze_bars=int(meta.get("squeeze_bars", 0)),
+            bars_since_fire=int(meta.get("bars_since_fire", 0)),
+            fired=bool(meta.get("bars_since_fire", 9999) == 0),
+            close=meta.get("close"),
+            adx_value=meta.get("adx_value"),
+            rsi_value=meta.get("rsi_value"),
+            vol_ratio=meta.get("vol_ratio"),
+            oi_change_pct=meta.get("oi_change_pct"),
+            composite_score=composite,
+            passed=passed,
+            rejection_reason=None if passed else (reason or "")[:250],
+            factors=factors or None,
+            timestamp=now_naive(),
+        )
+        buf = getattr(self, "_log_buf", None)
+        if buf is not None:
+            buf.append(row)          # written in one batch at the end of the scan
+            return
+        self._write_scan_logs([row])
+
+    @staticmethod
+    def _write_scan_logs(rows: List[Dict]) -> None:
+        if not rows:
+            return
         try:
+            from sqlalchemy import insert
             with session_scope() as db:
-                db.add(ScanLog(
-                    symbol=symbol, timeframe=timeframe,
-                    in_squeeze=bool(meta.get("in_squeeze", False)),
-                    squeeze_bars=int(meta.get("squeeze_bars", 0)),
-                    bars_since_fire=int(meta.get("bars_since_fire", 0)),
-                    fired=bool(meta.get("bars_since_fire", 9999) == 0),
-                    close=meta.get("close"),
-                    adx_value=meta.get("adx_value"),
-                    rsi_value=meta.get("rsi_value"),
-                    vol_ratio=meta.get("vol_ratio"),
-                    oi_change_pct=meta.get("oi_change_pct"),
-                    composite_score=composite,
-                    passed=passed,
-                    rejection_reason=None if passed else reason[:250],
-                    factors=factors or None,
-                    timestamp=now_naive(),
-                ))
+                db.execute(insert(ScanLog), rows)       # one executemany
         except Exception as exc:
-            logger.error("[Scanner] Could not write scan log: %s", exc)
+            logger.error("[Scanner] Could not write %d scan log(s): %s", len(rows), exc)
 
     # ------------------------------------------------------------------ #
     async def get_index_snapshots(self) -> List[Dict]:
