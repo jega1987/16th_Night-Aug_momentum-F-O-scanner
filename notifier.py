@@ -97,14 +97,25 @@ class Notifier:
     async def send_error(self, where: str, detail: str) -> bool:
         return await self.send(f"\u26a0\ufe0f <b>Scanner problem</b>\n{where}\n<code>{detail[:400]}</code>")
 
-    async def send_market_open(self, snapshots: List[Dict]) -> bool:
-        """Once-a-day 'scanner is live' ping with the index opening status."""
+    async def send_market_open(self, snapshots: List[Dict], radar: Dict = None) -> bool:
+        """Once-a-day 'scanner is live' ping with the index opening status,
+        the F&O ban list and how many symbols are on the radar today."""
+        radar_lines = []
+        if radar:
+            banned = radar.get("banned") or []
+            radar_lines.append(
+                f"\U0001F6AB F&amp;O ban: <b>{len(banned)}</b> stock(s)"
+                + (f" - {', '.join(banned)}" if banned else "")
+                + ("" if radar.get("ban_known", True) else " (today's NSE list not loaded yet)"))
+            radar_lines.append(
+                f"\U0001F4E1 Under radar: <b>{radar.get('stocks', 0)}</b> stocks"
+                f" + {radar.get('indices', 0)} indices")
         if not snapshots:
             return await self.send(
                 "\U0001F514 <b>Market Open</b>\n"
-                "Scanner is live, but no index quotes came back yet - "
-                "check /health.")
-        lines = ["\U0001F514 <b>Market Open</b>"]
+                + ("\n".join(radar_lines) + "\n" if radar_lines else "")
+                + "Scanner is live, but no index quotes came back yet - check /health.")
+        lines = ["\U0001F514 <b>Market Open</b>"] + radar_lines
         for s in snapshots:
             up = (s.get("change_abs") or 0) >= 0
             arrow = "\u25b2" if up else "\u25bc"
