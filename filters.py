@@ -204,7 +204,10 @@ class FilterEngine:
         res.meta["rsi_value"] = round(rsi_val, 2)
         # 5b. Exhaustion cap: a short into RSI 21 or a long into RSI 80 is
         # usually entering the end of the move (ICICIGI, 12-Oct: -1R).
-        if cfg.RSI_EXHAUSTION_FILTER and cfg.USE_RSI_FILTER:
+        stretched = ((direction == "LONG" and rsi_val > cfg.RSI_LONG_MAX) or
+                     (direction == "SHORT" and rsi_val < cfg.RSI_SHORT_MIN))
+        res.meta["rsi_stretched"] = bool(stretched)
+        if cfg.RSI_EXHAUSTION_FILTER and cfg.USE_RSI_FILTER and cfg.RSI_CAP_MODE == "hard":
             if direction == "LONG" and rsi_val > cfg.RSI_LONG_MAX:
                 res.reason = f"RSI {rsi_val:.1f} above {cfg.RSI_LONG_MAX:.0f} - move already stretched"
                 return res

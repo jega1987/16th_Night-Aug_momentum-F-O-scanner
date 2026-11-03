@@ -142,4 +142,5 @@ def rank_key(setup: Dict) -> float:
     """Composite, plus 0.10 when the sector is aligned, minus 0.10 against or LOW-ADX."""
     m = setup.get("meta") or {}
     return ((setup.get("composite_score") or 0.0) + 0.10 * (m.get("sector_trend") or 0)
-            - (0.10 if m.get("adx_low") else 0.0))
+            - (0.10 if m.get("adx_low") else 0.0)
+            - (0.10 if m.get("rsi_stretched") else 0.0))

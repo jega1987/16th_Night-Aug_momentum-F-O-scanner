@@ -227,6 +227,9 @@ class StrategyConfig:
     OPEN_BASELINE_MIN_DAYS: int = _int("OPEN_BASELINE_MIN_DAYS", 5)
     # RSI exhaustion cap: no LONG above RSI_LONG_MAX, no SHORT below RSI_SHORT_MIN.
     RSI_EXHAUSTION_FILTER: bool = _bool("RSI_EXHAUSTION_FILTER", False)
+    # hard: a stretched RSI (LONG > RSI_LONG_MAX, SHORT < RSI_SHORT_MIN) rejects
+    # the setup; soft: it is kept, tagged 'RSI stretched' and ranked lower.
+    RSI_CAP_MODE: str = os.getenv("RSI_CAP_MODE", "hard").strip().lower()
     RSI_LONG_MAX: float = _float("RSI_LONG_MAX", 75.0)
     RSI_SHORT_MIN: float = _float("RSI_SHORT_MIN", 25.0)
 

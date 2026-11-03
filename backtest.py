@@ -267,7 +267,8 @@ class SymbolBacktest:
                 c.RSI_EXHAUSTION_FILTER, c.GAP_FILTER, c.OPEN_VOLUME_BASELINE,
                 c.TRADING_MODE, getattr(c, "SQUEEZE_DETECTOR", "ttm"),
                 getattr(c, "BOX_MAX_WIDTH_ATR", None), getattr(c, "BOX_ATR_BARS", None),
-                c.BREAKOUT_MODE, c.COIL_MEMORY_BARS, c.BREAKOUT_VALID_BARS)
+                c.BREAKOUT_MODE, c.COIL_MEMORY_BARS, c.BREAKOUT_VALID_BARS,
+                c.RSI_CAP_MODE, c.KC_MULT, c.BB_MULT)
 
     def _evaluate(self, i: int) -> Optional[Dict]:
         key = (i, self._filter_signature())
@@ -645,6 +646,17 @@ def save_trades(engine, trades: List[Dict], run_id: str, label: str) -> None:
 # loaded config for that variant only. BT_* flags exist only in the backtest.
 PRESETS = {
     "base": [("live-rules", {})],
+    # 3-Nov: RSI cap soft vs hard, Keltner 1.75 vs 1.5, separately and merged
+    # (all on the 1-Nov rules now live), plus the box detector for reference.
+    "nov3": [
+        ("live-now", {}),
+        ("rsi-soft", {"RSI_CAP_MODE": "soft"}),
+        ("kc-1.75", {"KC_MULT": 1.75}),
+        ("rsi-soft+kc-1.75", {"RSI_CAP_MODE": "soft", "KC_MULT": 1.75}),
+        ("either-box-2.5", {"SQUEEZE_DETECTOR": "either", "BOX_MAX_WIDTH_ATR": 2.5}),
+        ("all-three", {"RSI_CAP_MODE": "soft", "KC_MULT": 1.75, "SQUEEZE_DETECTOR": "either",
+                       "BOX_MAX_WIDTH_ATR": 2.5}),
+    ],
     # 1-Nov rules: first-break range + coil memory, ADX 18 (stocks and indices).
     "nov1": [
         ("old-live", {"BREAKOUT_MODE": "legacy", "EQ_ADX_THRESHOLD": 22.0, "ADX_THRESHOLD": 20.0}),
