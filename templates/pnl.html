@@ -67,10 +67,12 @@
 {% set s = summary %}
 
 <header>
-  <h1>Signals &amp; P&amp;L</h1>
+  <h1>Signals &amp; P&amp;L{% if f.strategy == '1h' %} <span style="font-weight:400">/ One Hour (paper)</span>{% endif %}</h1>
   <span class="lbl">{{ 'option premium' if f.basis == 'option' else 'stock / futures level' }} basis</span>
   <div class="spacer"></div>
-  <a class="btn" href="/?{{ tq[1:] }}">Live</a>
+  <a class="btn {% if f.strategy != '1h' %}on{% endif %}" href="/pnl?strategy=15m{{ tq }}">15 Min</a>
+  <a class="btn {% if f.strategy == '1h' %}on{% endif %}" href="/pnl?strategy=1h{{ tq }}">One Hour</a>
+  <a class="btn" href="/?{% if f.strategy == '1h' %}tf=1h{% endif %}{{ tq }}">Live</a>
   <a class="btn" href="/performance?{{ tq[1:] }}">Analysis</a>
   <a class="btn" href="/watch?{{ tq[1:] }}">Watch (Box)</a>
   <a class="btn" href="/api/export.csv?days=3650{{ tq }}">CSV</a>
@@ -78,6 +80,7 @@
 
 <form class="filters" method="get" action="/pnl">
   {% if token %}<input type="hidden" name="token" value="{{ token }}">{% endif %}
+  <input type="hidden" name="strategy" value="{{ f.strategy }}">
   <label><span class="lbl">Period</span>
     <select name="period" id="period">
       {% for v, t in [('today','Today'),('week','This week'),('month','This month'),('all','All time'),('custom','Custom range')] %}

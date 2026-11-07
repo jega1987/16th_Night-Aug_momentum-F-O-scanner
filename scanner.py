@@ -13,7 +13,11 @@ from datetime import timedelta
 from typing import Dict, List, Optional
 
 from clock import MarketClock, now_naive, today_start
-from config import cfg
+from config import ONE_HOUR_TF, cfg
+from database import not_one_hour
+
+# 5-minute bars loaded for the One Hour track (~14 sessions -> ~95 hourly bars).
+ONEHOUR_HISTORY_BARS = 1050
 import watch
 from database import IndexSnapshot, OISnapshot, ScanLog, Signal, session_scope
 from feed_base import MarketFeed
@@ -209,7 +213,8 @@ class IndexScanner:
         if cfg.MAX_OPEN_POSITIONS > 0 and setups:
             with session_scope() as db:
                 open_now = (db.query(Signal)
-                              .filter(Signal.status.in_(["OPEN", "RUNNING"])).count())
+                              .filter(Signal.status.in_(["OPEN", "RUNNING"]),
+                                      not_one_hour()).count())
             room = max(0, cfg.MAX_OPEN_POSITIONS - open_now)
             if len(setups) > room:
                 ranked = sorted(setups, key=lambda x: -x.get("rank_score", x.get("composite_score", 0.0)))
@@ -236,10 +241,87 @@ class IndexScanner:
         return created
 
     # ------------------------------------------------------------------ #
-    async def _scan_symbol(self, symbol: str, timeframe: str) -> Optional[Dict]:
+    async def run_onehour_cycle(self) -> List[Dict]:
+        """
+        One Hour paper track (7 Nov 2026), run right after the 15m cycle so it
+        can never delay a 15m signal. Same filters, entry checks, option plan
+        and position manager; squeeze on completed 1-hour bars; no time-based
+        rules. Own caps (ONEHOUR_MAX_PER_DAY / ONEHOUR_MAX_OPEN); signals are
+        saved as timeframe "1h" and kept out of every 15m count and alert.
+        """
+        if not cfg.ONEHOUR_ENABLED or not self.engine or not MarketClock.is_market_open():
+            return []
+        import livestate
+        if livestate.kill_switch_on():
+            return []
+        max_day = cfg.ONEHOUR_MAX_PER_DAY or cfg.MAX_SIGNALS_PER_DAY
+        max_open = cfg.ONEHOUR_MAX_OPEN or cfg.MAX_OPEN_POSITIONS
+        with session_scope() as db:
+            today = (db.query(Signal).filter(Signal.timeframe == ONE_HOUR_TF,
+                                             Signal.timestamp >= today_start()).count())
+            open_now = (db.query(Signal).filter(Signal.timeframe == ONE_HOUR_TF,
+                                                Signal.status.in_(["OPEN", "RUNNING"])).count())
+        room = min(max_day - today if max_day > 0 else 10 ** 6,
+                   max_open - open_now if max_open > 0 else 10 ** 6)
+        if room <= 0:
+            return []
+        try:
+            import banlist
+            watchlist = [s for s in self.symbols() if not banlist.is_banned(s)]
+        except Exception:
+            watchlist = self.symbols()
+
+        import time as _t
+        t0 = _t.monotonic()
+        self._log_buf = []
+        try:
+            outcomes = await asyncio.gather(
+                *[self._scan_symbol(sym, cfg.TIMEFRAME, one_hour=True) for sym in watchlist],
+                return_exceptions=True)
+        finally:
+            buf, self._log_buf = self._log_buf, None
+            if buf:
+                await asyncio.to_thread(self._write_scan_logs, buf)
+        setups = []
+        for sym, out in zip(watchlist, outcomes):
+            if isinstance(out, Exception):
+                logger.debug("[1H] %s failed: %s", sym, out)
+            elif out:
+                setups.append(out)
+        logger.info("[1H] One Hour scan - %d setup(s), %d checked in %.1fs (room %d)",
+                    len(setups), len(buf or []), _t.monotonic() - t0, room)
+        if not setups:
+            return []
+
+        import sector_trend
+        for st in setups:
+            try:
+                await sector_trend.tag(self.feed, st)
+            except Exception as exc:
+                logger.debug("[Sector] %s tag failed: %s", st.get("symbol"), exc)
+            st["rank_score"] = sector_trend.rank_key(st)
+        setups = sorted(setups, key=lambda x: -x.get("rank_score", x.get("composite_score", 0.0)))[:room]
+        created = []
+        for setup in setups:
+            setup["triggered_by"] = "one_hour"
+            try:
+                sig = await self.engine.create_signal(setup)
+                if sig:
+                    created.append(sig)
+            except Exception as exc:
+                logger.exception("[1H] Could not record signal for %s: %s", setup["symbol"], exc)
+        return created
+
+    # ------------------------------------------------------------------ #
+    async def _scan_symbol(self, symbol: str, timeframe: str, one_hour: bool = False) -> Optional[Dict]:
+        # one_hour: the One Hour paper track - squeeze on completed 1-hour
+        # bars, same filters and 5-minute entries, saved as timeframe "1h".
+        label = ONE_HOUR_TF if one_hour else timeframe
         # ---- stage 1: candles only. Cheap, and it decides everything else. ----
-        hybrid = self._hybrid(timeframe)
+        hybrid = self._hybrid(timeframe) or one_hour
         bars = max(cfg.HISTORY_BARS, cfg.SQUEEZE_HISTORY_BARS) if hybrid else cfg.HISTORY_BARS
+        if one_hour:
+            bars = max(bars, ONEHOUR_HISTORY_BARS)
         if self.store and cfg.USE_CANDLE_STORE:
             df = await self.store.get(symbol, timeframe, bars, use_futures=True)
         else:
@@ -252,8 +334,17 @@ class IndexScanner:
         if cfg.SCAN_CLOSED_BARS_ONLY:
             df, why = self._closed_bars_only(df)
             if why:
-                self._log_scan(symbol, timeframe, {}, passed=False, reason=why)
+                if not one_hour:
+                    self._log_scan(symbol, timeframe, {}, passed=False, reason=why)
                 return None
+        full_df = df
+        if one_hour:
+            # 1-hour bars need ~2 weeks of 5-minute history; the checks
+            # themselves see the same 5-minute window as the 15m track.
+            sqz_df = self._completed_bars(full_df, cfg.ONEHOUR_SQUEEZE_TF)
+            if not self._worth_a_second_look(sqz_df, True):
+                return None
+            df = full_df.tail(max(cfg.HISTORY_BARS, cfg.SQUEEZE_HISTORY_BARS)).reset_index(drop=True)
 
         htf = None
         if cfg.HTF_ALIGNMENT:
@@ -262,7 +353,8 @@ class IndexScanner:
         # Hybrid mode: the squeeze is judged on COMPLETED 15-minute bars built
         # from the 5-minute frame. The 15-minute bar still forming is dropped -
         # its bands would move under us between the three 5-minute scans.
-        sqz_df = self._completed_squeeze_bars(df) if hybrid else None
+        if not one_hour:
+            sqz_df = self._completed_squeeze_bars(df) if hybrid else None
 
         latest = df.iloc[-1]
 
@@ -285,10 +377,22 @@ class IndexScanner:
         if cfg.OPEN_VOLUME_BASELINE and alive:
             vol_baseline = self._opening_volume_baseline(symbol, timeframe, latest["timestamp"])
 
-        result = self.filters.apply_all(df, htf=htf, oi=oi, symbol=symbol,
-                                        sqz_df=sqz_df, vol_baseline=vol_baseline)
+        if one_hour:
+            # Coils on 1-hour bars always span sessions: the same-day rule is
+            # off for this track (as in the 7-Nov backtest). Synchronous, so the
+            # override cannot leak into another coroutine.
+            saved_intraday = cfg.REQUIRE_INTRADAY_SQUEEZE
+            cfg.REQUIRE_INTRADAY_SQUEEZE = False
+            try:
+                result = self.filters.apply_all(df, htf=htf, oi=oi, symbol=symbol,
+                                                sqz_df=sqz_df, vol_baseline=vol_baseline)
+            finally:
+                cfg.REQUIRE_INTRADAY_SQUEEZE = saved_intraday
+        else:
+            result = self.filters.apply_all(df, htf=htf, oi=oi, symbol=symbol,
+                                            sqz_df=sqz_df, vol_baseline=vol_baseline)
 
-        self._log_scan(symbol, timeframe, result.meta,
+        self._log_scan(symbol, label, result.meta,
                        passed=result.passed,
                        reason=result.reason,
                        composite=result.scores.get("composite"),
@@ -297,18 +401,20 @@ class IndexScanner:
         # Remember coils that are armed but not yet broken, for the tick-level
         # early alert (rule 6, secondary trigger).
         m = result.meta
-        if m.get("coil_state") == "inside" and m.get("squeeze_high") and m.get("squeeze_low"):
-            self._armed[symbol] = (float(m["squeeze_high"]), float(m["squeeze_low"]))
-        else:
-            self._armed.pop(symbol, None)
+        if not one_hour:
+            if m.get("coil_state") == "inside" and m.get("squeeze_high") and m.get("squeeze_low"):
+                self._armed[symbol] = (float(m["squeeze_high"]), float(m["squeeze_low"]))
+            else:
+                self._armed.pop(symbol, None)
 
         if not result.passed:
             logger.debug("[Scanner] %s rejected: %s", symbol, result.reason)
-            if watch.enabled():
+            if watch.enabled() and not one_hour:
                 self._watch(symbol, df, htf, oi, sqz_df, vol_baseline, timeframe, result.reason)
             return None
 
-        blocked = self._cooldown_reason(symbol, result.direction)
+        blocked = (self._one_hour_block(symbol) if one_hour
+                   else self._cooldown_reason(symbol, result.direction))
         if blocked:
             logger.info("[Scanner] %s %s suppressed: %s", symbol, result.direction, blocked)
             return None
@@ -346,7 +452,7 @@ class IndexScanner:
             if slip > cfg.MAX_ENTRY_SLIP_ATR * atr_val:
                 reason = (f"Already ran {slip:.2f} ({slip / atr_val:.1f} ATR) past the "
                           f"closed bar - not chasing")
-                self._log_scan(symbol, timeframe, result.meta, passed=False, reason=reason,
+                self._log_scan(symbol, label, result.meta, passed=False, reason=reason,
                                composite=result.scores.get("composite"), factors=result.scores)
                 return None
             hi, lo = result.meta.get("squeeze_high"), result.meta.get("squeeze_low")
@@ -354,7 +460,7 @@ class IndexScanner:
                            (result.direction == "SHORT" and lo is not None and entry >= lo))
             if back_inside:
                 reason = f"Live price {entry:.2f} is back inside the squeeze range"
-                self._log_scan(symbol, timeframe, result.meta, passed=False, reason=reason,
+                self._log_scan(symbol, label, result.meta, passed=False, reason=reason,
                                composite=result.scores.get("composite"), factors=result.scores)
                 return None
 
@@ -366,7 +472,7 @@ class IndexScanner:
 
         return {
             "symbol": symbol,
-            "timeframe": timeframe,
+            "timeframe": label,
             "direction": result.direction,
             "entry": round(entry, 2),
             "bar_close": round(bar_close, 2),
@@ -533,6 +639,27 @@ class IndexScanner:
             sq = sq.iloc[:-1]
         return sq.reset_index(drop=True)
 
+    def _completed_bars(self, df: pd.DataFrame, tf: str) -> Optional[pd.DataFrame]:
+        """Bars of any timeframe (e.g. 60m) from closed 5-minute bars, complete ones only."""
+        if df is None or df.empty or not self.store:
+            return None
+        from indicators import bar_done_times
+        sq = self.store.resample(df, tf)
+        if sq.empty:
+            return sq
+        last_close = pd.Timestamp(df["timestamp"].iloc[-1]) + timedelta(minutes=5)
+        done = bar_done_times(sq)
+        return sq[done <= np.datetime64(last_close)].reset_index(drop=True)
+
+    @staticmethod
+    def _one_hour_block(symbol: str) -> Optional[str]:
+        """One Hour track: one open trade per symbol; no cooldown (data-based)."""
+        with session_scope() as db:
+            n = (db.query(Signal)
+                   .filter(Signal.symbol == symbol, Signal.timeframe == ONE_HOUR_TF,
+                           Signal.status.in_(["OPEN", "RUNNING"])).count())
+        return f"{n} One Hour position already open" if n else None
+
     def _opening_volume_baseline(self, symbol: str, timeframe: str, bar_ts) -> Optional[float]:
         """
         Average volume of this same 5-minute slot over the previous
@@ -682,7 +809,8 @@ class IndexScanner:
         with session_scope() as db:
             open_count = (db.query(Signal)
                             .filter(Signal.symbol == symbol,
-                                    Signal.status.in_(["OPEN", "RUNNING"]))
+                                    Signal.status.in_(["OPEN", "RUNNING"]),
+                                    not_one_hour())
                             .count())
             if open_count >= cfg.MAX_OPEN_PER_SYMBOL:
                 return f"{open_count} position already open"
@@ -690,7 +818,8 @@ class IndexScanner:
             recent = (db.query(Signal)
                         .filter(Signal.symbol == symbol,
                                 Signal.direction == direction,
-                                Signal.timestamp >= cutoff)
+                                Signal.timestamp >= cutoff,
+                                not_one_hour())
                         .count())
             if recent:
                 return f"cooldown active ({cfg.COOLDOWN_BARS} bars)"
