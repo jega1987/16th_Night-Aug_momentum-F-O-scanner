@@ -177,6 +177,15 @@ class Signal(Base):
     notes = Column(String)
 
 
+
+def not_one_hour():
+    """Filter: every signal except the One Hour paper track (old rows with no
+    timeframe count as main-track)."""
+    from sqlalchemy import or_
+    from config import ONE_HOUR_TF
+    return or_(Signal.timeframe.is_(None), Signal.timeframe != ONE_HOUR_TF)
+
+
 class IndexSnapshot(Base):
     __tablename__ = "index_snapshots"
     id = Column(Integer, primary_key=True)

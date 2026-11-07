@@ -151,19 +151,50 @@ VIX: Optional[VixState] = None
 SECTOR_MAP: Dict[str, str] = {}
 
 
+def squeeze_bars(store, d5: pd.DataFrame, tf: str) -> pd.DataFrame:
+    """Squeeze-timeframe bars from 5-minute bars: 15m, 60m (09:15 anchored) or 1d."""
+    if tf in ("1d", "day", "daily"):
+        ts = pd.to_datetime(d5["timestamp"])
+        g = d5.assign(_d=ts.dt.normalize()).groupby("_d", sort=True)
+        out = g.agg(open=("open", "first"), high=("high", "max"), low=("low", "min"),
+                    close=("close", "last"), volume=("volume", "sum")).reset_index()
+        out["timestamp"] = out["_d"] + pd.Timedelta(hours=9, minutes=15)
+        return out[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+    return store.resample(d5, tf).reset_index(drop=True)
+
+
 class SymbolBacktest:
     """Signals and simulated trades for one symbol."""
 
     def __init__(self, symbol: str, d5: pd.DataFrame, cfg, filters, store,
-                 eval_cache: Optional[Dict] = None, q15: Optional[pd.DataFrame] = None):
+                 eval_cache: Optional[Dict] = None, q15: Optional[pd.DataFrame] = None,
+                 bars_by_tf: Optional[Dict] = None):
         from clock import _parse_time
+        from indicators import bar_done_times
         self.eval_cache = eval_cache if eval_cache is not None else {}
         self.symbol, self.cfg, self.filters, self.store = symbol, cfg, filters, store
         self.d5 = d5.reset_index(drop=True)
-        self.q15 = q15 if q15 is not None else store.resample(self.d5, "15m")
-        # A 15-minute bucket is complete at bucket start + 15 min.
-        self.q15_done = (pd.to_datetime(self.q15["timestamp"]) + pd.Timedelta(minutes=15)).values
+        # Squeeze timeframe (BT_SQZ_TF: 15m live, 60m or 1d) and the Supertrend
+        # exit timeframe (BT_ST_TF: 15m live, or "sqz" = same as the squeeze).
+        bars_by_tf = bars_by_tf if bars_by_tf is not None else {}
+        if q15 is not None:
+            bars_by_tf.setdefault("15m", q15)
+
+        def bars(tf):
+            if tf not in bars_by_tf:
+                bars_by_tf[tf] = squeeze_bars(store, self.d5, tf)
+            return bars_by_tf[tf]
+        self.sqz_tf = getattr(cfg, "BT_SQZ_TF", "15m") or "15m"
+        st_tf = getattr(cfg, "BT_ST_TF", "15m") or "15m"
+        self.st_tf = self.sqz_tf if st_tf == "sqz" else st_tf
+        self.no_time = bool(getattr(cfg, "BT_NO_TIME_RULES", False))
+        self.q15 = bars(self.sqz_tf)              # the squeeze bars (name kept)
+        # A squeeze bar is complete at its start + length, capped at 15:30.
+        self.q15_done = bar_done_times(self.q15)
+        self.qst = bars(self.st_tf)
+        self.st_done = bar_done_times(self.qst)
         self.bar_close = (pd.to_datetime(self.d5["timestamp"]) + pd.Timedelta(minutes=5)).values
+        self.st_jidx = np.searchsorted(self.st_done, self.bar_close, side="right") - 1
         self.sig_start = _parse_time(cfg.SIGNAL_START_TIME, time(9, 45))
         self.sig_end = _parse_time(cfg.SIGNAL_END_TIME, time(14, 15))
         self.exit_t = _parse_time(cfg.POS_EXIT_TIME, time(15, 20))
@@ -200,7 +231,7 @@ class SymbolBacktest:
                 if i >= len(self.d5) - 1 or self._jidx[i] < 0:
                     continue
                 close_t = (stamps.iloc[i] + pd.Timedelta(minutes=5)).time()
-                if self.sig_start <= close_t <= self.sig_end:
+                if self.no_time or self.sig_start <= close_t <= self.sig_end:
                     out.append(int(i))
             return out
         dets = []
@@ -267,7 +298,8 @@ class SymbolBacktest:
                 c.RSI_EXHAUSTION_FILTER, c.GAP_FILTER, c.OPEN_VOLUME_BASELINE,
                 c.TRADING_MODE, getattr(c, "SQUEEZE_DETECTOR", "ttm"),
                 getattr(c, "BOX_MAX_WIDTH_ATR", None), getattr(c, "BOX_ATR_BARS", None),
-                c.BREAKOUT_MODE, c.COIL_MEMORY_BARS, c.BREAKOUT_VALID_BARS)
+                c.BREAKOUT_MODE, c.COIL_MEMORY_BARS, c.BREAKOUT_VALID_BARS,
+                getattr(c, "BT_SQZ_TF", "15m"))
 
     def _evaluate(self, i: int) -> Optional[Dict]:
         key = (i, self._filter_signature())
@@ -360,11 +392,14 @@ class SymbolBacktest:
         best = entry
         entry_day = pd.Timestamp(t["entry_time"]).date()
 
-        # Supertrend on completed 15-minute bars (causal).
+        # Supertrend on completed bars of the exit timeframe (causal).
         st_line, st_dir = (None, None)
-        if cfg.USE_SUPERTREND_EXIT and len(self.q15) > cfg.ST_PERIOD + 2:
-            line, d = supertrend(self.q15, cfg.ST_PERIOD, cfg.ST_MULT)
-            st_line, st_dir = line.values, d.values
+        if cfg.USE_SUPERTREND_EXIT and len(self.qst) > cfg.ST_PERIOD + 2:
+            key = ("st", self.st_tf)
+            if key not in self.eval_cache:
+                line, d = supertrend(self.qst, cfg.ST_PERIOD, cfg.ST_MULT)
+                self.eval_cache[key] = (line.values, d.values)
+            st_line, st_dir = self.eval_cache[key]
 
         def leg(price):
             return (price - entry) * sign / risk
@@ -399,12 +434,12 @@ class SymbolBacktest:
                 exit_price, reason, k_exit = tp3, "tp3", k
                 break
 
-            # 3. at a 15-minute bar completion: trail / flip
+            # 3. at an exit-timeframe bar completion: trail / flip
             close_ts = pd.Timestamp(bar["timestamp"]) + pd.Timedelta(minutes=5)
             trail_ok = not getattr(cfg, "BT_TRAIL_AFTER_TP1", False) or tp1_hit
             if st_dir is not None and trail_ok:
-                j = self._jidx[k]
-                if j >= 0 and pd.Timestamp(self.q15_done[j]) == close_ts:
+                j = self.st_jidx[k]
+                if j >= 0 and pd.Timestamp(self.st_done[j]) == close_ts:
                     sd, sl_ = int(st_dir[j]), float(st_line[j])
                     if (long_side and sd == -1) or (not long_side and sd == 1):
                         exit_price, reason, k_exit = c, "supertrend flip", k
@@ -412,6 +447,8 @@ class SymbolBacktest:
                     stop = max(stop, sl_) if long_side else min(stop, sl_)
 
             # 4. time stop (and the experimental same-day exit)
+            if self.no_time:
+                continue
             held = MarketClock.trading_days_between(entry_day, close_ts.date())
             at_bell = close_ts.time() >= self.exit_t
             if getattr(cfg, "BT_EXIT_EOD", False) and at_bell:
@@ -466,7 +503,7 @@ class SymbolBacktest:
         cands = self._candidates()
         busy_until = -1
         last_signal = -10 ** 9
-        cooldown = self.cfg.COOLDOWN_BARS
+        cooldown = 0 if self.no_time else self.cfg.COOLDOWN_BARS
         for i in cands:
             if i <= busy_until or i - last_signal < cooldown:
                 continue
@@ -544,6 +581,41 @@ def stats(rs: List[float]) -> Dict:
             "PF": round(pf, 2), "avgWinR": round(float(wins.mean()), 2) if len(wins) else 0,
             "avgLossR": round(float(losses.mean()), 2) if len(losses) else 0,
             "maxDD_R": round(dd, 1)}
+
+
+def monte_carlo(rs: List[float], sims: int = 5000, seed: int = 7) -> Dict:
+    """
+    Bootstrap Monte Carlo on the trade results (in R): each simulation draws
+    the same number of trades, with replacement, in random order. Gives the
+    spread of outcomes the same edge could have produced, and of the drawdown
+    and losing streaks along the way.
+    """
+    a = np.asarray(rs, dtype=float)
+    n = len(a)
+    if n < 10:
+        return {"n": n, "note": "too few trades"}
+    rng = np.random.default_rng(seed)
+    draws = a[rng.integers(0, n, size=(sims, n))]
+    total = draws.sum(axis=1)
+    eq = np.cumsum(draws, axis=1)
+    peak = np.maximum.accumulate(np.concatenate([np.zeros((sims, 1)), eq], axis=1), axis=1)[:, 1:]
+    dd = (eq - peak).min(axis=1)
+    loss = draws <= 0
+    streak = np.zeros(sims, dtype=int)
+    run = np.zeros(sims, dtype=int)
+    for k in range(n):                      # longest losing streak per simulation
+        run = np.where(loss[:, k], run + 1, 0)
+        streak = np.maximum(streak, run)
+    avg = draws.mean(axis=1)
+    pct = lambda x, q: round(float(np.percentile(x, q)), 2)
+    return {"n": n, "sims": sims,
+            "avgR_p5": pct(avg, 5), "avgR_p50": pct(avg, 50), "avgR_p95": pct(avg, 95),
+            "totalR_p5": pct(total, 5), "totalR_p50": pct(total, 50), "totalR_p95": pct(total, 95),
+            "prob_loss%": round(float((total <= 0).mean() * 100), 1),
+            "maxDD_p50": pct(dd, 50), "maxDD_p5_worst": pct(dd, 5),
+            "prob_DD_worse_20R%": round(float((dd <= -20).mean() * 100), 1),
+            "lose_streak_p50": int(np.percentile(streak, 50)),
+            "lose_streak_p95": int(np.percentile(streak, 95))}
 
 
 def breakdown(df: pd.DataFrame, col: str, bins=None, labels=None) -> Dict:
@@ -645,6 +717,22 @@ def save_trades(engine, trades: List[Dict], run_id: str, label: str) -> None:
 # loaded config for that variant only. BT_* flags exist only in the backtest.
 PRESETS = {
     "base": [("live-rules", {})],
+    # 7-Nov: squeeze release on 15m (live) vs 1-hour vs daily bars, 5-minute
+    # entries in every case. "pure" = no time-based rules: no signal window,
+    # no time stop / max hold, no cooldown - entry on the breakout close and
+    # exit only on stop, targets, trailing stop or Supertrend flip.
+    "sqztf": [
+        ("15m-live", {}),
+        ("15m-pure", {"BT_NO_TIME_RULES": True}),
+        ("1h-pure-st15m", {"BT_NO_TIME_RULES": True, "BT_SQZ_TF": "60m",
+                           "REQUIRE_INTRADAY_SQUEEZE": False}),
+        ("1h-pure-st1h", {"BT_NO_TIME_RULES": True, "BT_SQZ_TF": "60m", "BT_ST_TF": "sqz",
+                          "REQUIRE_INTRADAY_SQUEEZE": False}),
+        ("1d-pure-st15m", {"BT_NO_TIME_RULES": True, "BT_SQZ_TF": "1d",
+                           "REQUIRE_INTRADAY_SQUEEZE": False}),
+        ("1d-pure-st1d", {"BT_NO_TIME_RULES": True, "BT_SQZ_TF": "1d", "BT_ST_TF": "sqz",
+                          "REQUIRE_INTRADAY_SQUEEZE": False}),
+    ],
     # 1-Nov rules: first-break range + coil memory, ADX 18 (stocks and indices).
     "nov1": [
         ("old-live", {"BREAKOUT_MODE": "legacy", "EQ_ADX_THRESHOLD": 22.0, "ADX_THRESHOLD": 20.0}),
@@ -772,6 +860,7 @@ def main(argv=None) -> int:
     t0 = _time.time()
     per_variant: Dict[str, List[Dict]] = {v[0]: [] for v in variants}
     rejects: Dict[str, int] = {}
+    rejects_by: Dict[str, Dict[str, int]] = {v[0]: {} for v in variants}
     for n, sym in enumerate(symbols, 1):
         try:
             d5 = load_series(engine, sym, "5m", args.days)
@@ -779,11 +868,14 @@ def main(argv=None) -> int:
                 continue
             cache: Dict = {}
             q15 = store.resample(d5, "15m")
+            tf_bars = {"15m": q15}
             for name, changes in variants:
                 saved = _set_cfg(cfg, changes)
                 try:
-                    bt = SymbolBacktest(sym, d5, cfg, filters, store, cache, q15)
+                    bt = SymbolBacktest(sym, d5, cfg, filters, store, cache, q15, tf_bars)
                     per_variant[name] += bt.run()
+                    for k, v in bt.rejects.items():
+                        rejects_by[name][k] = rejects_by[name].get(k, 0) + v
                     if name == variants[0][0]:
                         for k, v in bt.rejects.items():
                             rejects[k] = rejects.get(k, 0) + v
@@ -813,7 +905,13 @@ def main(argv=None) -> int:
                                 "by_half": r.get("by_half"), "by_exit": r.get("by_exit"),
                                 "by_setup": r.get("by_setup"),
                                 "by_direction": r.get("by_direction"),
-                                "tp1_hit%": r.get("tp1_hit%")}
+                                "tp1_hit%": r.get("tp1_hit%"),
+                                "median_hold_bars5m": r.get("median_bars_held"),
+                                "uncapped": stats([t["r"] for t in per_variant[name]]),
+                                "monte_carlo": monte_carlo([t["r"] for t in capped]),
+                                "monte_carlo_uncapped": monte_carlo([t["r"] for t in per_variant[name]]),
+                                "top_rejections": dict(sorted(rejects_by[name].items(),
+                                                              key=lambda x: -x[1])[:8])}
             if not args.no_save:
                 try:
                     save_trades(engine, capped, "cmp" + uuid.uuid4().hex[:6], args.preset + ":" + name)

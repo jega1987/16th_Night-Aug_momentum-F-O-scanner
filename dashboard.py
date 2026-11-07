@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 
 import analytics
 from clock import MarketClock, now_naive, today_start
-from config import cfg
-from database import IndexSnapshot, ScanLog, Signal, get_db
+from config import ONE_HOUR_TF, cfg
+from database import IndexSnapshot, ScanLog, Signal, get_db, not_one_hour
 from runtime import budget, engine, feed, scanner, state, store, universe
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,8 @@ async def health(db: Session = Depends(get_db)):
     """Railway health check. Reports degraded rather than failing so a broker
     outage doesn't put the service into a restart loop."""
     try:
-        signals_today = db.query(Signal).filter(Signal.timestamp >= today_start()).count()
+        signals_today = (db.query(Signal).filter(Signal.timestamp >= today_start(),
+                                                 not_one_hour()).count())
         db_ok = True
     except Exception as exc:
         signals_today, db_ok = 0, False
@@ -160,7 +161,7 @@ async def dashboard(request: Request,
     at this page needs to see everything else that DID work, not a blank
     Internal Server Error with no way to tell what broke.
     """
-    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    tf = tf if tf in ("5m", "15m", ONE_HOUR_TF) else cfg.TIMEFRAME
     render_error: Optional[str] = None
 
     def safe(label: str, fn, default):
@@ -226,6 +227,12 @@ async def dashboard(request: Request,
     budget_status = safe("signal budget", budget.check,
                          {"used": 0, "cap": cfg.MAX_SIGNALS_PER_DAY,
                           "remaining": cfg.MAX_SIGNALS_PER_DAY, "exhausted": False})
+    if tf == ONE_HOUR_TF:
+        # One Hour track has its own daily cap (ONEHOUR_MAX_PER_DAY, 0 = same as 15m).
+        cap1h = cfg.ONEHOUR_MAX_PER_DAY or cfg.MAX_SIGNALS_PER_DAY
+        used1h = len(today_signals)
+        budget_status = {"used": used1h, "cap": cap1h, "remaining": max(0, cap1h - used1h),
+                         "exhausted": used1h >= cap1h}
     watchlist_size = safe("watchlist size", lambda: len(scanner.symbols()), len(cfg.INDICES))
 
     closed = [s for s in today_signals if s.status in CLOSED_STATES]
@@ -233,6 +240,7 @@ async def dashboard(request: Request,
 
     ctx = {
         "timeframe": tf,
+        "one_hour": tf == ONE_HOUR_TF,
         "indices": cfg.INDICES,
         "snapshots": snapshots,
         "squeeze_state": squeeze_state,
@@ -270,7 +278,7 @@ async def dashboard(request: Request,
 @app.get("/api/signals")
 async def api_signals(tf: str = Query(default=None), limit: int = Query(default=50, le=200),
                       db: Session = Depends(get_db), _=Depends(require_token)):
-    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    tf = tf if tf in ("5m", "15m", ONE_HOUR_TF) else cfg.TIMEFRAME
     rows = (db.query(Signal).filter(Signal.timeframe == tf)
               .order_by(Signal.timestamp.desc()).limit(limit).all())
     return [{
@@ -286,7 +294,7 @@ async def api_signals(tf: str = Query(default=None), limit: int = Query(default=
 @app.get("/api/equity")
 async def api_equity(tf: str = Query(default=None), db: Session = Depends(get_db),
                      _=Depends(require_token)):
-    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    tf = tf if tf in ("5m", "15m", ONE_HOUR_TF) else cfg.TIMEFRAME
     rows = (db.query(Signal)
               .filter(Signal.timeframe == tf, Signal.status.in_(CLOSED_STATES))
               .order_by(Signal.timestamp).all())
@@ -352,7 +360,7 @@ async def api_kill(on: bool = Query(...), request: Request = None, _=Depends(req
 
 @app.get("/api/stats")
 async def api_stats(tf: str = Query(default=None), _=Depends(require_token)):
-    return engine.daily_stats(tf if tf in ("5m", "15m") else cfg.TIMEFRAME)
+    return engine.daily_stats(tf if tf in ("5m", "15m", ONE_HOUR_TF) else cfg.TIMEFRAME)
 
 
 @app.get("/api/scan-now")
@@ -391,7 +399,7 @@ async def performance_page(request: Request,
                            tf: str = Query(default=None),
                            token: Optional[str] = Query(default=None),
                            _=Depends(require_token)):
-    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    tf = tf if tf in ("5m", "15m", ONE_HOUR_TF) else cfg.TIMEFRAME
     report = analytics.full_report(days, tf)
     ctx = {
         "timeframe": tf, "days": days, "token": token or "",
@@ -401,11 +409,12 @@ async def performance_page(request: Request,
     return templates.TemplateResponse(request, "performance.html", ctx)
 
 
-def _pnl_filter(period, date_from, date_to, group, symbol, asset, side, result, exit, basis):
+def _pnl_filter(period, date_from, date_to, group, symbol, asset, side, result, exit, basis,
+                strategy="15m"):
     import pnl_report
     return pnl_report.PnlFilter(period=period, date_from=date_from or None, date_to=date_to or None,
                                 group=group, symbol=symbol or "", asset=asset, side=side,
-                                result=result, exit=exit, basis=basis)
+                                result=result, exit=exit, basis=basis, strategy=strategy)
 
 
 @app.get("/pnl")
@@ -415,10 +424,11 @@ async def pnl_page(request: Request,
                    symbol: Optional[str] = Query(default=None), asset: str = Query(default="all"),
                    side: str = Query(default="all"), result: str = Query(default="all"),
                    exit: str = Query(default="all"), basis: str = Query(default="option"),
+                   strategy: str = Query(default="15m"),
                    token: Optional[str] = Query(default=None), _=Depends(require_token)):
     """Signals and P&L with date range, grouping and filters."""
     import pnl_report
-    f = _pnl_filter(period, date_from, date_to, group, symbol, asset, side, result, exit, basis)
+    f = _pnl_filter(period, date_from, date_to, group, symbol, asset, side, result, exit, basis, strategy)
     data = pnl_report.build(f)
     ctx = {"token": token or "", "now": now_naive().strftime("%d %b %Y, %H:%M IST"),
            "f": data["filter"], "summary": data["summary"], "chart": data["chart"],
@@ -449,9 +459,10 @@ async def api_pnl(period: str = Query(default="month"), date_from: Optional[str]
                   symbol: Optional[str] = Query(default=None), asset: str = Query(default="all"),
                   side: str = Query(default="all"), result: str = Query(default="all"),
                   exit: str = Query(default="all"), basis: str = Query(default="option"),
+                   strategy: str = Query(default="15m"),
                   _=Depends(require_token)):
     import pnl_report
-    f = _pnl_filter(period, date_from, date_to, group, symbol, asset, side, result, exit, basis)
+    f = _pnl_filter(period, date_from, date_to, group, symbol, asset, side, result, exit, basis, strategy)
     data = pnl_report.build(f)
     return {"filter": {k: v for k, v in vars(data["filter"]).items()},
             "summary": data["summary"], "chart": data["chart"], "signals": data["rows"]}
@@ -460,20 +471,20 @@ async def api_pnl(period: str = Query(default="month"), date_from: Optional[str]
 @app.get("/api/performance")
 async def api_performance(days: int = Query(default=30, ge=1, le=730),
                           tf: str = Query(default=None), _=Depends(require_token)):
-    return analytics.full_report(days, tf if tf in ("5m", "15m") else cfg.TIMEFRAME)
+    return analytics.full_report(days, tf if tf in ("5m", "15m", ONE_HOUR_TF) else cfg.TIMEFRAME)
 
 
 @app.get("/api/equity-curve")
 async def api_equity_curve(days: int = Query(default=30, ge=1, le=730),
                            tf: str = Query(default=None), _=Depends(require_token)):
-    return analytics.equity_curve(days, tf if tf in ("5m", "15m") else cfg.TIMEFRAME)
+    return analytics.equity_curve(days, tf if tf in ("5m", "15m", ONE_HOUR_TF) else cfg.TIMEFRAME)
 
 
 @app.get("/api/export.csv")
 async def api_export(days: int = Query(default=365, ge=1, le=3650),
                      tf: str = Query(default=None), _=Depends(require_token)):
     """The whole ledger, for analysis outside this app."""
-    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    tf = tf if tf in ("5m", "15m", ONE_HOUR_TF) else cfg.TIMEFRAME
     csv_text = analytics.to_csv(days, tf)
     stamp = now_naive().strftime("%Y%m%d")
     return Response(
@@ -579,7 +590,7 @@ async def api_logs(tf: str = Query(default=None),
                        description="Comma-separated symbols, e.g. 'NIFTY 50,BANKNIFTY,HINDALCO'"),
                    limit: int = Query(default=50, le=300),
                    db: Session = Depends(get_db), _=Depends(require_token)):
-    tf = tf if tf in ("5m", "15m") else cfg.TIMEFRAME
+    tf = tf if tf in ("5m", "15m", ONE_HOUR_TF) else cfg.TIMEFRAME
     symbols_filter = _parse_symbol_filter(symbol)
     q = db.query(ScanLog).filter(ScanLog.timeframe == tf)
     if symbols_filter:

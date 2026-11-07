@@ -359,6 +359,19 @@ class StrategyConfig:
     # F&O ban list (NSE "Securities in Ban Period"): no new signal on a banned stock.
     FO_BAN_FILTER: bool = _bool("FO_BAN_FILTER", True)
     FO_BAN_URL: str = os.getenv("FO_BAN_URL", "https://nsearchives.nseindia.com/content/fo/fo_secban.csv")
+    # ---------- One Hour paper track (7 Nov 2026) ----------
+    # A second, paper-only strategy run after every 5-minute scan: the squeeze
+    # is judged on completed 1-hour bars, entries on 5-minute closes, the
+    # Supertrend trail on 1-hour bars, and no time-based rules (no signal
+    # window, cooldown or max holding days; option expiry still closes it).
+    # Saved with timeframe "1h", so it never touches the 15m caps, counts,
+    # risk limits or Telegram alerts. Shown under the dashboard's One Hour switch.
+    ONEHOUR_ENABLED: bool = _bool("ONEHOUR_ENABLED", True)
+    ONEHOUR_SQUEEZE_TF: str = os.getenv("ONEHOUR_SQUEEZE_TF", "60m")
+    ONEHOUR_TRAIL_TF: str = os.getenv("ONEHOUR_TRAIL_TF", "60m")
+    ONEHOUR_MAX_OPEN: int = _int("ONEHOUR_MAX_OPEN", 0)          # 0 = same as MAX_OPEN_POSITIONS
+    ONEHOUR_MAX_PER_DAY: int = _int("ONEHOUR_MAX_PER_DAY", 0)    # 0 = same as MAX_SIGNALS_PER_DAY
+    ONEHOUR_TELEGRAM: bool = _bool("ONEHOUR_TELEGRAM", False)
     SECTOR_SOURCE_URL: str = os.getenv(
         "SECTOR_SOURCE_URL", "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv")
     # ---------- data retention (retention.py, daily after the close) ----------
@@ -571,3 +584,7 @@ class StrategyConfig:
 
 
 cfg = StrategyConfig()
+
+
+# Timeframe label stored on One Hour paper signals (and their scan logs).
+ONE_HOUR_TF = "1h"

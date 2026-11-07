@@ -13,7 +13,8 @@ import logging
 from typing import Callable, Dict, List, Optional
 
 from clock import now_naive, today_start
-from config import cfg
+from config import ONE_HOUR_TF, cfg
+from database import not_one_hour
 from database import Signal, session_scope
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,8 @@ class SignalBudget:
     @staticmethod
     def used_today() -> int:
         with session_scope() as db:
-            return db.query(Signal).filter(Signal.timestamp >= today_start()).count()
+            return (db.query(Signal).filter(Signal.timestamp >= today_start(),
+                                            not_one_hour()).count())
 
     def remaining(self) -> int:
         return max(0, cfg.MAX_SIGNALS_PER_DAY - self.used_today())

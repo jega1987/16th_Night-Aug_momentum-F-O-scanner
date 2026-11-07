@@ -34,6 +34,7 @@ class PnlFilter:
     result: str = "all"              # all | win | loss | open
     exit: str = "all"                # all | any closed status
     basis: str = "option"            # option | stock
+    strategy: str = "15m"            # 15m (live scanner) | 1h (One Hour paper track)
     errors: List[str] = field(default_factory=list)
 
     def normalise(self) -> "PnlFilter":
@@ -45,6 +46,7 @@ class PnlFilter:
             "result": ("all", "win", "loss", "open"),
             "exit": ("all",) + CLOSED,
             "basis": ("option", "stock"),
+            "strategy": ("15m", "1h"),
         }
         defaults = PnlFilter()
         for name, options in allowed.items():
@@ -95,6 +97,10 @@ def load(f: PnlFilter) -> List[Signal]:
     start, end = f.window()
     with session_scope() as db:
         q = db.query(Signal)
+        # The One Hour paper track is reported on its own, never mixed in.
+        from database import not_one_hour
+        from config import ONE_HOUR_TF
+        q = q.filter(Signal.timeframe == ONE_HOUR_TF) if f.strategy == "1h" else q.filter(not_one_hour())
         # A trade belongs to the window if it was opened in it or closed in it.
         if start is not None:
             q = q.filter((Signal.timestamp >= start) | (Signal.exit_time >= start))

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Squeeze Scanner · {{ timeframe }}</title>
+<title>{% if one_hour %}One Hour · Squeeze Scanner{% else %}Squeeze Scanner · {{ timeframe }}{% endif %}</title>
 <style>
   :root{
     --ink:#11151b; --panel:#171d25; --panel-2:#1d242e; --rule:#2b3540;
@@ -111,7 +111,7 @@
 <body>
 
 <header>
-  <h1>Squeeze Scanner <span>/ {{ timeframe }}</span></h1>
+  <h1>{% if one_hour %}One Hour <span>/ paper · 1-hour squeeze</span>{% else %}Squeeze Scanner <span>/ {{ timeframe }}</span>{% endif %}</h1>
   <span class="pill {% if session == 'LIVE' %}live{% elif session in ['PRE-OPEN','NO NEW ENTRIES','SQUARE-OFF'] %}warn{% else %}off{% endif %}">{{ session }}</span>
   {% if not feed_connected %}<span class="pill off">feed down</span>{% endif %}
   {% if render_error %}
@@ -132,7 +132,8 @@
   {% endif %}
   <a class="btn {% if timeframe=='5m' %}on{% endif %}" href="?tf=5m{% if token %}&token={{ token }}{% endif %}">5m</a>
   <a class="btn {% if timeframe=='15m' %}on{% endif %}" href="?tf=15m{% if token %}&token={{ token }}{% endif %}">15m</a>
-  <a class="btn" href="/pnl{% if token %}?token={{ token }}{% endif %}">Signals &amp; P&amp;L</a>
+  <a class="btn {% if one_hour %}on{% endif %}" href="?tf=1h{% if token %}&token={{ token }}{% endif %}" title="One Hour paper track: squeeze on 1-hour bars">One Hour</a>
+  <a class="btn" href="/pnl?strategy={{ '1h' if one_hour else '15m' }}{% if token %}&token={{ token }}{% endif %}">Signals &amp; P&amp;L</a>
   <a class="btn" href="/performance?tf={{ timeframe }}{% if token %}&token={{ token }}{% endif %}">Analysis</a>
   <a class="btn" href="/watch{% if token %}?token={{ token }}{% endif %}">Watch (Box)</a>
   <button class="btn" id="scan">Scan now</button>
@@ -143,6 +144,9 @@
   Part of this page couldn't load: <code>{{ render_error }}</code><br>
   Everything else below is showing normally. Check the deploy logs for the full traceback.
 </div>
+{% endif %}
+{% if one_hour %}
+<div class="banner">One Hour paper track: the squeeze is judged on completed 1-hour bars, entries on 5-minute closes, the Supertrend trail on 1-hour bars, and there are no time-based exits (option expiry still closes a trade). Separate from the live 15m scanner: own caps, no Telegram alerts.</div>
 {% endif %}
 {% if feed_mode == 'mock' %}
 <div class="banner">Synthetic feed. Prices, signals and P&amp;L on this page are generated, not market data. Set FEED_MODE=5paisa with credentials to go live.</div>
@@ -291,7 +295,7 @@
   </table>
   </div>
   {% else %}
-  <div class="empty"><b>No signals yet on {{ timeframe }}</b>Setups need a squeeze of {{ min_squeeze_bars }}+ bars to release with volume behind it. The scan log below shows what each check saw.</div>
+  <div class="empty"><b>No signals yet on {% if one_hour %}One Hour{% else %}{{ timeframe }}{% endif %}</b>Setups need a squeeze of {{ min_squeeze_bars }}+ bars to release with volume behind it. The scan log below shows what each check saw.</div>
   {% endif %}
 </section>
 

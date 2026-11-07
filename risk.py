@@ -16,7 +16,8 @@ from datetime import timedelta
 from typing import Dict, List, Optional
 
 from clock import now_naive
-from config import cfg
+from config import ONE_HOUR_TF, cfg
+from database import not_one_hour
 from database import Signal, session_scope
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,9 @@ def _r(sig: Signal) -> float:
 
 def period_r(since) -> float:
     with session_scope() as db:
-        closed = db.query(Signal).filter(Signal.exit_time >= since,
+        closed = db.query(Signal).filter(Signal.exit_time >= since, not_one_hour(),
                                          ~Signal.status.in_(OPEN)).all()
-        opened = db.query(Signal).filter(Signal.timestamp >= since,
+        opened = db.query(Signal).filter(Signal.timestamp >= since, not_one_hour(),
                                          Signal.status.in_(OPEN)).all()
         return round(sum(_r(s) for s in closed) + sum(_r(s) for s in opened), 2)
 
@@ -60,7 +61,8 @@ def apply_sector_cap(setups: List[Dict]) -> List[Dict]:
     import sectors
     with session_scope() as db:
         held = [(s.symbol, s.direction) for s in
-                db.query(Signal).filter(Signal.status.in_(OPEN)).all()]
+                db.query(Signal).filter(Signal.status.in_(OPEN),
+                                        not_one_hour()).all()]
     count: Dict = {}
     for sym, d in held:
         if not cfg.is_index(sym):

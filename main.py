@@ -90,6 +90,13 @@ async def job_scan():
         state.last_scan_error = str(exc)
         logger.exception("[Scan] Cycle failed")
         await notifier.send_error("Scan cycle", str(exc))
+    # One Hour paper track, after the 15m cycle so it never delays it.
+    try:
+        made = await scanner.run_onehour_cycle()
+        if made:
+            logger.info("[1H] %d new One Hour paper signal(s)", len(made))
+    except Exception:
+        logger.exception("[1H] One Hour cycle failed")
 
 
 async def job_manage_positions():

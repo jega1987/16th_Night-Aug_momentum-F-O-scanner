@@ -15,11 +15,12 @@ import math
 from datetime import date, time, timedelta
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from clock import MarketClock, _parse_time, now_naive, today_start
-from config import cfg
-from database import CLOSED_STATUSES, OPEN_STATUSES, Signal, session_scope
+from config import ONE_HOUR_TF, cfg
+from database import CLOSED_STATUSES, OPEN_STATUSES, Signal, not_one_hour, session_scope
 from indicators import atm_strike, supertrend
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,8 @@ class SignalEngine:
         # during a deploy (Redis lock; always granted without Redis).
         import livestate
         bar = (setup.get("meta") or {}).get("bar_time") or str(setup.get("timestamp") or "")
-        if not livestate.acquire(f"signal:{setup['symbol']}:{setup['direction']}:{bar}", 3600):
+        track = ":1h" if setup.get("timeframe") == ONE_HOUR_TF else ""
+        if not livestate.acquire(f"signal:{setup['symbol']}:{setup['direction']}:{bar}{track}", 3600):
             logger.warning("[Engine] %s %s for bar %s already recorded by another process - skipped",
                            setup["symbol"], setup["direction"], bar)
             return None
@@ -286,9 +288,30 @@ class SignalEngine:
             self.after_new_signal()
         except Exception as exc:
             logger.warning("[Engine] Could not start tick tracking for %s: %s", payload["symbol"], exc)
-        if self.notifier:
+        if self.notifier and self._alerts_for(payload):
             await self.notifier.send_signal(payload)
         return payload
+
+    @staticmethod
+    def _alerts_for(s: Dict) -> bool:
+        """Telegram for the 15m track; the One Hour paper track only if enabled."""
+        return s.get("timeframe") != ONE_HOUR_TF or cfg.ONEHOUR_TELEGRAM
+
+    @staticmethod
+    async def _one_hour_trend(feed, symbol: str) -> Optional[tuple]:
+        """(line, direction) of the Supertrend on completed 1-hour futures bars."""
+        from indicators import bar_done_times
+        df = await feed.get_historical(symbol, cfg.ONEHOUR_TRAIL_TF, max(60, cfg.ST_PERIOD * 6),
+                                       use_futures=True)
+        if df is None or len(df) < cfg.ST_PERIOD + 2:
+            return None
+        df = df.reset_index(drop=True)
+        done = bar_done_times(df)
+        df = df[done <= np.datetime64(now_naive())].reset_index(drop=True)
+        if len(df) < cfg.ST_PERIOD + 2:
+            return None
+        line, direction = supertrend(df, cfg.ST_PERIOD, cfg.ST_MULT)
+        return float(line.iloc[-1]), int(direction.iloc[-1])
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -443,6 +466,7 @@ class SignalEngine:
             self._pos: Dict[int, Dict] = {}          # open trades by id
             self._lock = asyncio.Lock()
             self._trends: Dict[str, tuple] = {}      # symbol -> (supertrend line, direction)
+            self._trends_1h: Dict[str, tuple] = {}   # One Hour track: 1-hour Supertrend
             self._stock_px: Dict[str, float] = {}    # symbol -> last futures price
             self._opt_q: Dict[int, Dict] = {}        # option token -> latest quote
             self._last_persist: Dict[int, float] = {}
@@ -582,6 +606,14 @@ class SignalEngine:
             except Exception as exc:
                 logger.warning("[Engine] Cannot price %s this cycle: %s", symbol, exc)
 
+        # One Hour track: Supertrend on COMPLETED 1-hour futures bars.
+        if cfg.USE_SUPERTREND_EXIT:
+            for symbol in sorted({s["symbol"] for s in live if s.get("timeframe") == ONE_HOUR_TF}):
+                try:
+                    self._trends_1h[symbol] = await self._one_hour_trend(feed, symbol)
+                except Exception as exc:
+                    logger.warning("[Engine] 1h Supertrend unavailable for %s: %s", symbol, exc)
+
         if cfg.OPTION_TRACKING:
             now_m = _t.monotonic()
             for s in live:
@@ -667,11 +699,12 @@ class SignalEngine:
                                s.get("id"), s.get("symbol"), ", ".join(missing))
             return False
         reason = None
-        if cfg.is_positional:
+        one_hour = s.get("timeframe") == ONE_HOUR_TF
+        if cfg.is_positional or one_hour:
             reason = self._positional_exit_reason(s)
         elif MarketClock.should_square_off():
             reason = "Closed at the intraday square-off"
-        trend = self._trends.get(s["symbol"])
+        trend = (self._trends_1h if one_hour else self._trends).get(s["symbol"])
         stock_px = self._stock_px.get(s["symbol"])
         tok = s.get("opt_token") or s.get("_q_key")
         q = self._opt_q.get(tok) if tok else None
@@ -713,7 +746,7 @@ class SignalEngine:
                             "option %s", s["symbol"], s["id"], s["status"], s.get("exit_price") or 0,
                             s.get("opt_exit"), s.get("pnl") or 0,
                             f"{s['opt_pnl']:+.0f}" if s.get("opt_pnl") is not None else "-")
-                if self.notifier:
+                if self.notifier and self._alerts_for(s):
                     try:
                         await self.notifier.send_exit(s)
                     except Exception as exc:
@@ -856,7 +889,8 @@ class SignalEngine:
         at_bell = now.time() >= exit_t
 
         opened = s.get("timestamp")
-        if opened is not None:
+        # One Hour track: no holding-period limit (data-based exits only).
+        if opened is not None and s.get("timeframe") != ONE_HOUR_TF:
             held = MarketClock.trading_days_between(pd.Timestamp(opened).date(), now.date())
             if held > cfg.POS_MAX_HOLD_DAYS or (held == cfg.POS_MAX_HOLD_DAYS and at_bell):
                 return f"Max holding period of {cfg.POS_MAX_HOLD_DAYS} trading days reached"
@@ -972,7 +1006,8 @@ class SignalEngine:
     async def force_square_off(self, feed, reason: str = "Session close") -> List[Dict]:
         """Close everything still open, used at 15:20 and on shutdown."""
         with session_scope() as db:
-            rows = db.query(Signal).filter(Signal.status.in_(list(OPEN_STATUSES))).all()
+            rows = (db.query(Signal).filter(Signal.status.in_(list(OPEN_STATUSES)),
+                                            not_one_hour()).all())
             live = [_as_dict(r) for r in rows]
         if not live:
             return []
