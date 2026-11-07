@@ -263,6 +263,25 @@ def atm_strike(spot: float, step: int) -> int:
     return int(round(spot / step) * step)
 
 
+def bar_done_times(q: pd.DataFrame, session_close=(15, 30)) -> np.ndarray:
+    """
+    Completion time of each bar of a resampled series (15m, 60m or daily):
+    bar start + bar length, capped at the session close (the last hourly bar,
+    15:15-15:30, completes at 15:30; a daily bar completes at 15:30).
+    """
+    ts = pd.to_datetime(q["timestamp"])
+    if len(ts) == 0:
+        return np.array([], dtype="datetime64[ns]")
+    close = ts.dt.normalize() + pd.Timedelta(hours=session_close[0], minutes=session_close[1])
+    same_day = ts.dt.normalize() == ts.shift().dt.normalize()
+    d = ts.diff()
+    steps = d[same_day & (d > pd.Timedelta(0))]
+    if steps.empty and len(ts) >= 2:
+        return close.values                       # one bar per day: daily bars
+    step = steps.min() if not steps.empty else pd.Timedelta(minutes=15)
+    return np.minimum(ts + step, close).values
+
+
 def breakout_states(q: pd.DataFrame, d5: pd.DataFrame, in_sqz: pd.Series, duration: pd.Series,
                     min_bars: int, memory_bars: int, valid_bars: int, max_range_bars: int = 20):
     """
@@ -292,11 +311,10 @@ def breakout_states(q: pd.DataFrame, d5: pd.DataFrame, in_sqz: pd.Series, durati
            "bars_since_break": np.full(n5, -1), "state": np.array(["none"] * n5, dtype=object)}
     if n5 == 0 or len(q) == 0:
         return pd.DataFrame(out)
-    qts = pd.to_datetime(q["timestamp"]).values
-    ts5 = pd.to_datetime(d5["timestamp"])
-    period = ts5.dt.floor("15min").values
-    # number of q bars that START before the 5-minute bar's 15-minute period
-    pos = np.searchsorted(qts, period, side="left")
+    ts5 = pd.to_datetime(d5["timestamp"]).values
+    # number of squeeze-timeframe bars COMPLETED by the 5-minute bar's open,
+    # i.e. those before the period that contains it (15m, 60m or daily bars).
+    pos = np.searchsorted(bar_done_times(q), ts5, side="right")
     sq = np.asarray(in_sqz, dtype=bool)
     dur = np.asarray(duration).astype(int)
     hi_q, lo_q = q["high"].to_numpy(dtype=float), q["low"].to_numpy(dtype=float)
