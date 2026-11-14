@@ -299,7 +299,8 @@ class SymbolBacktest:
                 c.TRADING_MODE, getattr(c, "SQUEEZE_DETECTOR", "ttm"),
                 getattr(c, "BOX_MAX_WIDTH_ATR", None), getattr(c, "BOX_ATR_BARS", None),
                 c.BREAKOUT_MODE, c.COIL_MEMORY_BARS, c.BREAKOUT_VALID_BARS,
-                getattr(c, "BT_SQZ_TF", "15m"))
+                getattr(c, "BT_SQZ_TF", "15m"), getattr(c, "ONE_BREAK_PER_COIL", False),
+                getattr(c, "FIRST_BREAK_FULL_MEMORY", False))
 
     def _evaluate(self, i: int) -> Optional[Dict]:
         key = (i, self._filter_signature())
@@ -423,6 +424,10 @@ class SymbolBacktest:
 
             # 2. targets
             reach = (lambda p: h >= p) if long_side else (lambda p: l <= p)
+            be_at = getattr(cfg, "BT_BE_AT_R", None)
+            if be_at and leg(best) >= be_at:
+                # stop to breakeven once the trade has gone be_at R our way
+                stop = max(stop, entry) if long_side else min(stop, entry)
             if not tp1_hit and reach(tp1):
                 realized += f1 * leg(tp1); open_frac -= f1; tp1_hit = True
                 if cfg.MOVE_SL_TO_BE_AFTER_TP1:
@@ -479,11 +484,21 @@ class SymbolBacktest:
         if MARKET is not None:
             m = MARKET.at(close_ts)
             t["mkt_trend"], t["mkt_adx"], t["mkt_day"] = m["trend"], round(m["adx"], 1), m["day"]
-            if getattr(cfg, "BT_MKT_FILTER", False):
+            side_only = getattr(cfg, "BT_MKT_SIDE", None)     # None = both sides
+            if getattr(cfg, "BT_MKT_FILTER", False) and (not side_only or side_only == t["direction"]):
                 if m["trend"] != want or m["adx"] <= (getattr(cfg, "BT_MKT_ADX", 20.0) or 20.0):
                     return "market filter (NIFTY trend/ADX)"
             if getattr(cfg, "BT_DAY_FILTER", False) and m["day"] != want:
                 return "market filter (NIFTY vs day open)"
+        wide = getattr(cfg, "BT_WIDE_CANDLE_ATR", None)
+        if wide:
+            if not hasattr(self, "_atr5"):
+                from indicators import atr
+                self._atr5 = atr(self.d5, 14).values
+            rng = float(self.d5["high"].iloc[i] - self.d5["low"].iloc[i])
+            a = self._atr5[i - 1] if i > 0 else np.nan
+            if a and not np.isnan(a) and rng > wide * a:
+                return "wide breakout candle"
         vmin, vmax = getattr(cfg, "BT_VIX_PCT_MIN", None), getattr(cfg, "BT_VIX_PCT_MAX", None)
         if VIX is not None:
             p = VIX.pct(pd.Timestamp(close_ts).date())
@@ -715,12 +730,42 @@ def save_trades(engine, trades: List[Dict], run_id: str, label: str) -> None:
 # --------------------------------------------------------------------------- #
 # Variant sets: (name, {config attribute: value}). Values are applied to the
 # loaded config for that variant only. BT_* flags exist only in the backtest.
+
+# One Hour paper track as live (1-hour squeeze, 1-hour Supertrend, no time rules).
+_ONE_HOUR = {"BT_NO_TIME_RULES": True, "BT_SQZ_TF": "60m", "BT_ST_TF": "sqz",
+             "REQUIRE_INTRADAY_SQUEEZE": False}
+
 PRESETS = {
     "base": [("live-rules", {})],
     # 7-Nov: squeeze release on 15m (live) vs 1-hour vs daily bars, 5-minute
     # entries in every case. "pure" = no time-based rules: no signal window,
     # no time stop / max hold, no cooldown - entry on the breakout close and
     # exit only on stop, targets, trailing stop or Supertrend flip.
+    # 14-Nov: fixes from the 30-day live review (A exits before T1, B direction
+    # follows NIFTY) and the One Hour case studies (C1 wide breakout candle -
+    # MANAPPURAM 13-Nov; C2 coil memory ~1 session, C3 one breakout per coil -
+    # SONACOMS 9-Nov). C2/C3 also replay enough 5m bars to see the whole memory.
+    "nov14": [
+        ("15m-live", {}),
+        ("A1-be0.75", {"BT_BE_AT_R": 0.75}),
+        ("A2-t1-1.0", {"TARGET_R_MULTS": [1.0, 2.5, 4.0]}),
+        ("A3-be0.75+t1-1.0", {"BT_BE_AT_R": 0.75, "TARGET_R_MULTS": [1.0, 2.5, 4.0]}),
+        ("B1-nifty-trend", {"BT_MKT_FILTER": True, "BT_MKT_ADX": 0.001}),
+        ("B2-nifty-trend-puts", {"BT_MKT_FILTER": True, "BT_MKT_ADX": 0.001, "BT_MKT_SIDE": "SHORT"}),
+        ("A3+B1", {"BT_BE_AT_R": 0.75, "TARGET_R_MULTS": [1.0, 2.5, 4.0],
+                   "BT_MKT_FILTER": True, "BT_MKT_ADX": 0.001}),
+        ("1h-base", dict(_ONE_HOUR)),
+        ("1h-C1-wide2.5", dict(_ONE_HOUR, BT_WIDE_CANDLE_ATR=2.5)),
+        ("1h-C2-mem7", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True)),
+        ("1h-C3-onebreak", dict(_ONE_HOUR, ONE_BREAK_PER_COIL=True, FIRST_BREAK_FULL_MEMORY=True)),
+        ("1h-C2+C3", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, ONE_BREAK_PER_COIL=True,
+                          FIRST_BREAK_FULL_MEMORY=True)),
+        ("1h-C-all", dict(_ONE_HOUR, BT_WIDE_CANDLE_ATR=2.5, COIL_MEMORY_BARS=7,
+                          ONE_BREAK_PER_COIL=True, FIRST_BREAK_FULL_MEMORY=True)),
+        ("1h-C-all+A3", dict(_ONE_HOUR, BT_WIDE_CANDLE_ATR=2.5, COIL_MEMORY_BARS=7,
+                             ONE_BREAK_PER_COIL=True, FIRST_BREAK_FULL_MEMORY=True,
+                             BT_BE_AT_R=0.75, TARGET_R_MULTS=[1.0, 2.5, 4.0])),
+    ],
     "sqztf": [
         ("15m-live", {}),
         ("15m-pure", {"BT_NO_TIME_RULES": True}),

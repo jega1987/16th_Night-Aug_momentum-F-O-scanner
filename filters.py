@@ -268,10 +268,21 @@ class FilterEngine:
         cfg = self.cfg
         latest = df.iloc[-1]
         chosen = None
+        # 5-minute bars to replay: enough to see every break inside the coil
+        # memory. Sized for 15m bars (3 x 5m each) unless FIRST_BREAK_FULL_MEMORY,
+        # which sizes it from the squeeze bars' own length (12 for 1-hour bars).
+        per = 3
+        if getattr(cfg, "FIRST_BREAK_FULL_MEMORY", False) and len(base) > 1:
+            ts = pd.to_datetime(base["timestamp"])
+            d = ts.diff()[ts.dt.normalize() == ts.shift().dt.normalize()]
+            step = d[d > pd.Timedelta(0)].min() if len(d) else None
+            per = max(3, int(step / pd.Timedelta(minutes=5))) if step is not None and not pd.isna(step) else 75
+        n5 = cfg.COIL_MEMORY_BARS * per + 60
         for name, in_sqz, sqz_dur, fired in compression_setups(base, cfg):
-            st = breakout_states(base, df.iloc[-(cfg.COIL_MEMORY_BARS * 3 + 60):], in_sqz, sqz_dur,
+            st = breakout_states(base, df.iloc[-n5:], in_sqz, sqz_dur,
                                  cfg.MIN_SQUEEZE_BARS, cfg.COIL_MEMORY_BARS,
-                                 cfg.BREAKOUT_VALID_BARS, cfg.SQUEEZE_RANGE_MAX_BARS).iloc[-1]
+                                 cfg.BREAKOUT_VALID_BARS, cfg.SQUEEZE_RANGE_MAX_BARS,
+                                 one_break=bool(getattr(cfg, "ONE_BREAK_PER_COIL", False))).iloc[-1]
             rank = {"breakout": 0, "stale": 1, "inside": 2, "compressing": 3, "none": 4}[st["state"]]
             if chosen is None or rank < chosen[0]:
                 chosen = (rank, name, st, in_sqz, sqz_dur, fired)
