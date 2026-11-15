@@ -29,6 +29,10 @@ import pandas as pd
 from clock import now_naive
 
 logger = logging.getLogger(__name__)
+# httpx logs every request URL at INFO; the login URL carries the PIN and TOTP
+# as query parameters (Dhan's API), so request logging is kept off.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 API = "https://api.dhan.co/v2"
 AUTH = "https://auth.dhan.co"
