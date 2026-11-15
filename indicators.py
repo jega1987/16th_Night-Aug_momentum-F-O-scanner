@@ -283,7 +283,8 @@ def bar_done_times(q: pd.DataFrame, session_close=(15, 30)) -> np.ndarray:
 
 
 def breakout_states(q: pd.DataFrame, d5: pd.DataFrame, in_sqz: pd.Series, duration: pd.Series,
-                    min_bars: int, memory_bars: int, valid_bars: int, max_range_bars: int = 20):
+                    min_bars: int, memory_bars: int, valid_bars: int, max_range_bars: int = 20,
+                    one_break: bool = False):
     """
     First-breakout tracking with coil memory (rules of 1 Nov 2026).
 
@@ -351,11 +352,13 @@ def breakout_states(q: pd.DataFrame, d5: pd.DataFrame, in_sqz: pd.Series, durati
         c = closes[i]
         side = 1 if c > hi else (-1 if c < lo else 0)
         if side == 0:
-            frozen, first = None, None
+            if not one_break:
+                frozen, first = None, None   # back inside: the coil can break again
             hi, lo = rng_cache[(s, e)]
             out["state"][i] = "inside"
         else:
-            if first is None or side != first[1]:
+            # one_break: a coil gives one breakout; later closes outside are stale
+            if first is None or (not one_break and side != first[1]):
                 frozen, first = (hi, lo), (i, side)
             since = i - first[0]
             out["break_i"][i] = first[0]

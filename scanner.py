@@ -6,6 +6,7 @@ Every rejection is written to scan_logs. When the scanner goes quiet for a day
 that log is the only way to tell "no setups" apart from "broken feed".
 """
 import asyncio
+import contextlib
 import logging
 import numpy as np
 import pandas as pd
@@ -18,6 +19,29 @@ from database import not_one_hour
 
 # 5-minute bars loaded for the One Hour track (~14 sessions -> ~95 hourly bars).
 ONEHOUR_HISTORY_BARS = 1050
+
+
+@contextlib.contextmanager
+def one_hour_rules():
+    """
+    Settings that differ for the One Hour track, applied only around its
+    (synchronous) checks:
+      - same-day squeeze rule off: 1-hour coils always span sessions (7 Nov);
+      - coil memory ONEHOUR_COIL_MEMORY_BARS (7 = ~1 session after the squeeze
+        ends, not 26 hours = ~4 days) and enough 5m bars replayed to see every
+        break inside it - stops stale coils like SONACOMS 9 Nov (C2, 14 Nov).
+    """
+    changes = {"REQUIRE_INTRADAY_SQUEEZE": False,
+               "COIL_MEMORY_BARS": cfg.ONEHOUR_COIL_MEMORY_BARS or cfg.COIL_MEMORY_BARS,
+               "FIRST_BREAK_FULL_MEMORY": True}
+    saved = {k: getattr(cfg, k, None) for k in changes}
+    try:
+        for k, v in changes.items():
+            setattr(cfg, k, v)
+        yield
+    finally:
+        for k, v in saved.items():
+            setattr(cfg, k, v)
 import watch
 from database import IndexSnapshot, OISnapshot, ScanLog, Signal, session_scope
 from feed_base import MarketFeed
@@ -342,8 +366,9 @@ class IndexScanner:
             # 1-hour bars need ~2 weeks of 5-minute history; the checks
             # themselves see the same 5-minute window as the 15m track.
             sqz_df = self._completed_bars(full_df, cfg.ONEHOUR_SQUEEZE_TF)
-            if not self._worth_a_second_look(sqz_df, True):
-                return None
+            with one_hour_rules():
+                if not self._worth_a_second_look(sqz_df, True):
+                    return None
             df = full_df.tail(max(cfg.HISTORY_BARS, cfg.SQUEEZE_HISTORY_BARS)).reset_index(drop=True)
 
         htf = None
@@ -363,7 +388,11 @@ class IndexScanner:
         # for ~98% of symbol-scans. At 200 symbols that is the difference between
         # a workable budget and a rate-limit wall.
         oi = None
-        alive = self._worth_a_second_look(sqz_df if hybrid else df, hybrid)
+        if one_hour:
+            with one_hour_rules():
+                alive = self._worth_a_second_look(sqz_df, True)
+        else:
+            alive = self._worth_a_second_look(sqz_df if hybrid else df, hybrid)
         if cfg.USE_OI_FILTER and alive:
             # Kite returns open interest inside the candles, so the change is a
             # real bar-over-bar figure rather than the difference between two
@@ -378,16 +407,11 @@ class IndexScanner:
             vol_baseline = self._opening_volume_baseline(symbol, timeframe, latest["timestamp"])
 
         if one_hour:
-            # Coils on 1-hour bars always span sessions: the same-day rule is
-            # off for this track (as in the 7-Nov backtest). Synchronous, so the
-            # override cannot leak into another coroutine.
-            saved_intraday = cfg.REQUIRE_INTRADAY_SQUEEZE
-            cfg.REQUIRE_INTRADAY_SQUEEZE = False
-            try:
+            # One Hour rules (see one_hour_rules). Synchronous, so the
+            # overrides cannot leak into another coroutine.
+            with one_hour_rules():
                 result = self.filters.apply_all(df, htf=htf, oi=oi, symbol=symbol,
                                                 sqz_df=sqz_df, vol_baseline=vol_baseline)
-            finally:
-                cfg.REQUIRE_INTRADAY_SQUEEZE = saved_intraday
         else:
             result = self.filters.apply_all(df, htf=htf, oi=oi, symbol=symbol,
                                             sqz_df=sqz_df, vol_baseline=vol_baseline)

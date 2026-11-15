@@ -372,6 +372,12 @@ class StrategyConfig:
     ONEHOUR_MAX_OPEN: int = _int("ONEHOUR_MAX_OPEN", 0)          # 0 = same as MAX_OPEN_POSITIONS
     ONEHOUR_MAX_PER_DAY: int = _int("ONEHOUR_MAX_PER_DAY", 0)    # 0 = same as MAX_SIGNALS_PER_DAY
     ONEHOUR_TELEGRAM: bool = _bool("ONEHOUR_TELEGRAM", False)
+    # Coil memory for the One Hour track, in 1-hour bars after the squeeze
+    # ends (7 = about one session). 0 = same as COIL_MEMORY_BARS. (14 Nov 2026)
+    ONEHOUR_COIL_MEMORY_BARS: int = _int("ONEHOUR_COIL_MEMORY_BARS", 7)
+    # First-break replay options (14 Nov 2026 backtest). Off for the 15m track.
+    FIRST_BREAK_FULL_MEMORY: bool = _bool("FIRST_BREAK_FULL_MEMORY", False)
+    ONE_BREAK_PER_COIL: bool = _bool("ONE_BREAK_PER_COIL", False)
     SECTOR_SOURCE_URL: str = os.getenv(
         "SECTOR_SOURCE_URL", "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv")
     # ---------- data retention (retention.py, daily after the close) ----------
