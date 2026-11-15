@@ -140,26 +140,30 @@ def load(dhan, symbols: List[str], days5: int, days15: int, daily: int) -> Dict:
             if expected and have >= 0.9 * expected:
                 stats[sym][tf] = have
                 continue
-            got = 0
-            try:
-                if tf == "1d":
-                    start = (end - timedelta(days=days)).date()
-                    cur = start
-                    while cur < end.date():
-                        nxt = min(end.date() + timedelta(days=1), cur + timedelta(days=365))
-                        got += _insert(_rows(dhan.daily(sid, seg, kind, cur, nxt), sym, tf))
-                        cur = nxt
-                else:
-                    interval = int(tf[:-1])
-                    cur = end - timedelta(days=days)
-                    while cur < end:
-                        nxt = min(end, cur + timedelta(days=INTRADAY_SPAN))
-                        got += _insert(_rows(dhan.intraday(sid, seg, kind, cur, nxt, interval), sym, tf))
-                        cur = nxt
-            except Exception as exc:
-                logger.warning("%s %s: %s", sym, tf, exc)
-                if getattr(exc, "is_auth", False):
-                    raise
+            got, failed = 0, 0
+            if tf == "1d":
+                start, step = end - timedelta(days=days), timedelta(days=365)
+            else:
+                start, step = end - timedelta(days=days), timedelta(days=INTRADAY_SPAN)
+            cur = start
+            while cur < end:
+                nxt = min(end, cur + step)
+                try:
+                    if tf == "1d":
+                        df = dhan.daily(sid, seg, kind, cur.date(), (nxt + timedelta(days=1)).date())
+                    else:
+                        df = dhan.intraday(sid, seg, kind, cur, nxt, int(tf[:-1]))
+                    got += _insert(_rows(df, sym, tf))
+                except Exception as exc:
+                    if getattr(exc, "is_auth", False):
+                        raise
+                    # A chunk before the listing date (new stocks) has no data:
+                    # skip it and carry on with the later chunks.
+                    failed += 1
+                    logger.debug("%s %s %s: %s", sym, tf, cur.date(), exc)
+                cur = nxt
+            if failed and not got:
+                logger.warning("%s %s: no data from Dhan (%d chunk(s) failed)", sym, tf, failed)
             stats[sym][tf] = got
         if n % 10 == 0 or n == len(symbols):
             logger.info("Progress %d/%d | %d Dhan calls | %.1f min", n, len(symbols), dhan.calls,
