@@ -38,6 +38,8 @@ import backfill_history  # noqa: F401  (registers the hist_candles table)
 logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                     format="%(asctime)s %(levelname)-7s dhanfill  %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("dhanfill")
+logging.getLogger("httpx").setLevel(logging.WARNING)      # never log URLs (login has PIN/TOTP)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 VIX = "INDIA VIX"
 SOURCE = "dhan_spot"

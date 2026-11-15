@@ -28,6 +28,10 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+# Request URLs can carry credentials or session IDs (Kite login redirects,
+# Dhan token generation), so per-request httpx logging stays off.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 feed = build_feed()
 notifier = Notifier()
