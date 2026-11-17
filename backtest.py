@@ -300,7 +300,7 @@ class SymbolBacktest:
                 getattr(c, "BOX_MAX_WIDTH_ATR", None), getattr(c, "BOX_ATR_BARS", None),
                 c.BREAKOUT_MODE, c.COIL_MEMORY_BARS, c.BREAKOUT_VALID_BARS,
                 getattr(c, "BT_SQZ_TF", "15m"), getattr(c, "ONE_BREAK_PER_COIL", False),
-                getattr(c, "FIRST_BREAK_FULL_MEMORY", False))
+                getattr(c, "FIRST_BREAK_FULL_MEMORY", False), getattr(c, "GAP_MODE", "reject"))
 
     def _evaluate(self, i: int) -> Optional[Dict]:
         key = (i, self._filter_signature())
@@ -765,6 +765,20 @@ PRESETS = {
         ("1h-C-all+A3", dict(_ONE_HOUR, BT_WIDE_CANDLE_ATR=2.5, COIL_MEMORY_BARS=7,
                              ONE_BREAK_PER_COIL=True, FIRST_BREAK_FULL_MEMORY=True,
                              BT_BE_AT_R=0.75, TARGET_R_MULTS=[1.0, 2.5, 4.0])),
+    ],
+    # 17-Nov: FORTIS 16-Nov - gap open beyond a previous-session coil.
+    # reject = live rule; first = judge the closed 09:15 candle (signal 09:20);
+    # wait1 = skip the 09:15 candle, signal from 09:25 if still beyond the range.
+    "gap": [
+        ("15m-reject", {"SIGNAL_START_TIME": "09:15", "GAP_MODE": "reject"}),
+        ("15m-first", {"SIGNAL_START_TIME": "09:15", "GAP_MODE": "first"}),
+        ("15m-wait1", {"SIGNAL_START_TIME": "09:15", "GAP_MODE": "wait1"}),
+        ("1h-reject", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                           GAP_MODE="reject")),
+        ("1h-first", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                          GAP_MODE="first")),
+        ("1h-wait1", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                          GAP_MODE="wait1")),
     ],
     "sqztf": [
         ("15m-live", {}),

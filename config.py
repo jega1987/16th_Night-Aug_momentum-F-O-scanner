@@ -218,6 +218,13 @@ class StrategyConfig:
     # the range in the trade's direction.
     GAP_FILTER: bool = _bool("GAP_FILTER", True)
     GAP_MAX_ATR: float = _float("GAP_MAX_ATR", 0.5)
+    # What a gap beyond a previous-session coil does (17 Nov, FORTIS 16-Nov):
+    #   "reject" - current rule: no signal from that coil today;
+    #   "first"  - ignore the opening print; judge the closed 09:15 candle and
+    #              later ones like any breakout (signal from 09:20);
+    #   "wait1"  - skip the 09:15 candle too; signal from the 09:20 candle's
+    #              close (09:25) if price is still beyond the range.
+    GAP_MODE: str = os.getenv("GAP_MODE", "reject").strip().lower()
     # Opening volume baseline: until OPEN_BASELINE_UNTIL, compare a bar's
     # volume with the same 5-minute slot averaged over the last
     # OPEN_BASELINE_DAYS sessions, not with yesterday's quiet afternoon.

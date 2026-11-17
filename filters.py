@@ -407,6 +407,16 @@ class FilterEngine:
         if atr_val <= 0:
             return None
         limit = self.cfg.GAP_MAX_ATR * atr_val
+        gapped = ((direction == "LONG" and day_open > hi + limit)
+                  or (direction == "SHORT" and day_open < lo - limit))
+        mode = str(getattr(self.cfg, "GAP_MODE", "reject") or "reject").lower()
+        if gapped and mode == "first":
+            return None                      # judged on closed candles like any breakout
+        if gapped and mode == "wait1":
+            if len(todays) <= 1:
+                return (f"Gap open {day_open:.2f} beyond the squeeze range "
+                        f"{lo:.2f}-{hi:.2f} - waiting for the first candle to settle")
+            return None
         if direction == "LONG" and day_open > hi + limit:
             return (f"Gap-up open {day_open:.2f} already {day_open - hi:.2f} above the "
                     f"squeeze high {hi:.2f} - breakout happened overnight")
