@@ -31,6 +31,8 @@ def main(argv):
             like = c.execute(text("SELECT DISTINCT symbol FROM scan_logs WHERE timestamp >= :a "
                                   "AND timestamp < :b AND upper(symbol) LIKE :p"),
                              {"a": day, "b": nxt, "p": w[:4] + "%"}).fetchall()
+            exact = [r for r in like if r[0].upper() == w]
+            like = exact or like
             print(f"SCANREPORT {w}: universe matches {[(n, uni_map.get(n)) for n in names]} | "
                   f"scan_log symbols {[r[0] for r in like]}", flush=True)
             for (sym,) in like:
