@@ -780,6 +780,14 @@ PRESETS = {
         ("1h-wait1", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
                           GAP_MODE="wait1")),
     ],
+    # 17-Nov: is the RSI exhaustion cap (no LONG > 75, no SHORT < 25) worth it?
+    "rsi": [
+        ("15m-live", {"SIGNAL_START_TIME": "09:15"}),
+        ("15m-no-rsi-cap", {"SIGNAL_START_TIME": "09:15", "RSI_EXHAUSTION_FILTER": False}),
+        ("1h-live", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True)),
+        ("1h-no-rsi-cap", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                               RSI_EXHAUSTION_FILTER=False)),
+    ],
     "sqztf": [
         ("15m-live", {}),
         ("15m-pure", {"BT_NO_TIME_RULES": True}),
