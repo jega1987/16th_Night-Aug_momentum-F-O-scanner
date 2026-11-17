@@ -30,6 +30,8 @@ def main(argv):
         keys = set(zip(ref["symbol"], ref["entry_time"])) if len(ref) else set()
         df["extra_vs_" + cmp_label.split(":")[-1]] = [(s, e) not in keys
                                                        for s, e in zip(df["symbol"], df["entry_time"])]
+    if cmp_label and "--only-extra" in argv:
+        df = df[df["extra_vs_" + cmp_label.split(":")[-1]]]
     print(f"EXPORT START {label} rows={len(df)}", flush=True)
     for rec in df.to_dict("records"):
         print("TRADEROW " + json.dumps(rec, default=str), flush=True)
