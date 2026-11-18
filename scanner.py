@@ -29,11 +29,14 @@ def one_hour_rules():
       - same-day squeeze rule off: 1-hour coils always span sessions (7 Nov);
       - coil memory ONEHOUR_COIL_MEMORY_BARS (7 = ~1 session after the squeeze
         ends, not 26 hours = ~4 days) and enough 5m bars replayed to see every
-        break inside it - stops stale coils like SONACOMS 9 Nov (C2, 14 Nov).
+        break inside it - stops stale coils like SONACOMS 9 Nov (C2, 14 Nov);
+      - RSI exhaustion cap off unless ONEHOUR_RSI_CAP (18 Nov, RSI backtest).
     """
     changes = {"REQUIRE_INTRADAY_SQUEEZE": False,
                "COIL_MEMORY_BARS": cfg.ONEHOUR_COIL_MEMORY_BARS or cfg.COIL_MEMORY_BARS,
                "FIRST_BREAK_FULL_MEMORY": True}
+    if not cfg.ONEHOUR_RSI_CAP:
+        changes["RSI_EXHAUSTION_FILTER"] = False   # RSI cap off for One Hour (18 Nov)
     saved = {k: getattr(cfg, k, None) for k in changes}
     try:
         for k, v in changes.items():
