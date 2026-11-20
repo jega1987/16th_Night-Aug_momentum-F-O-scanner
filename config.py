@@ -247,8 +247,9 @@ class StrategyConfig:
     # Supertrend trailing stop is computed on this timeframe in positional mode.
     POS_TRAIL_TIMEFRAME: str = os.getenv("POS_TRAIL_TIMEFRAME", "15m")
     # Option expiry: in positional mode pick the nearest expiry at least this
-    # many days away, so the option is not decaying fast while held.
-    OPTION_MIN_DTE: int = _int("OPTION_MIN_DTE", 7)
+    # many calendar days away, so the option is not decaying fast while held.
+    # 5 (user rule 20 Nov): roll to next month only when <= 4 days remain.
+    OPTION_MIN_DTE: int = _int("OPTION_MIN_DTE", 5)
     # Cap on positions open at the same time, across days. 0 = no cap.
     MAX_OPEN_POSITIONS: int = _int("MAX_OPEN_POSITIONS", 0)
     # Re-quote each open signal's option every minute and track option P&L.
