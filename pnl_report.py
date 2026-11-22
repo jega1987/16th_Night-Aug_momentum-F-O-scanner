@@ -190,8 +190,47 @@ def build(f: PnlFilter) -> Dict:
         "win_rate": [round(series[k]["wins"] / series[k]["trades"] * 100, 1) for k in labels],
         "cumulative": cum,
     }
-    return {"filter": f, "summary": summary, "chart": chart,
-            "rows": [row_view(r, f.basis) for r in rows]}
+    views = [row_view(r, f.basis) for r in rows]
+    try:
+        from fill_check import summary_for
+        fills = summary_for([r.id for r in rows])
+    except Exception:
+        fills = {}
+    fill_total, entry_pcts, checked = 0.0, [], 0
+    for v in views:
+        fc = fills.get(v["id"])
+        v["fill"] = _fill_view(fc) if fc else None
+        if fc:
+            checked += 1
+            fill_total += fc.get("total_rs") or 0
+            e = fc["legs"].get("ENTRY") or {}
+            if e.get("slip_pct_0s") is not None:
+                entry_pcts.append(e["slip_pct_0s"])
+    summary["fill_checked"] = checked
+    summary["fill_total_rs"] = round(fill_total, 2)
+    summary["fill_entry_avg_pct"] = (round(sum(entry_pcts) / len(entry_pcts), 2)
+                                     if entry_pcts else None)
+    return {"filter": f, "summary": summary, "chart": chart, "rows": views}
+
+
+def _fill_view(fc: Dict) -> Dict:
+    """Entry and exit-side slippage for one signal (fill_check.summary_for)."""
+    legs = fc.get("legs") or {}
+    e = legs.get("ENTRY")
+    sells = [legs[k] for k in ("T1", "T2", "EXIT") if k in legs]
+    def per_unit(leg, key):
+        return leg.get(key) if leg else None
+    sell_rs = sum((l.get("slip_0s") or 0) * (l.get("qty") or 0) for l in sells) if sells else None
+    sell_qty = sum(l.get("qty") or 0 for l in sells) if sells else 0
+    return {
+        "entry_0": per_unit(e, "slip_0s"), "entry_15": per_unit(e, "slip_15s"),
+        "entry_60": per_unit(e, "slip_60s"), "entry_pct": per_unit(e, "slip_pct_0s"),
+        "entry_spread": per_unit(e, "spread_0s"), "entry_thin": bool(e and e.get("thin")),
+        "sell_avg": round(sell_rs / sell_qty, 2) if sells and sell_qty else None,
+        "sell_legs": ", ".join(k for k in ("T1", "T2", "EXIT") if k in legs) or None,
+        "sell_thin": any(l.get("thin") for l in sells),
+        "total_rs": fc.get("total_rs"),
+    }
 
 
 def option_now(r) -> Dict:

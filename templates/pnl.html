@@ -144,6 +144,9 @@
   <div class="stat"><div class="lbl">max drawdown</div><div class="v num down">{{ '{:,.0f}'.format(-s.max_drawdown) if s.max_drawdown else '0' }}</div></div>
   <div class="stat"><div class="lbl">open now</div><div class="v num">{{ s.open }}</div>
     <div class="s num {% if s.open_mtm > 0 %}up{% elif s.open_mtm < 0 %}down{% endif %}">MTM {{ '{:+,.0f}'.format(s.open_mtm) }}</div></div>
+  <div class="stat" title="Signals from 23 Nov onwards are re-quoted from the live order book after each paper fill"><div class="lbl">live fill check</div>
+    <div class="v num {% if s.fill_total_rs > 0 %}down{% elif s.fill_total_rs < 0 %}up{% endif %}">{{ '{:+,.0f}'.format(s.fill_total_rs) if s.fill_checked else '—' }}</div>
+    <div class="s num">{% if s.fill_checked %}{{ s.fill_checked }} trades · buy {{ '{:+.2f}'.format(s.fill_entry_avg_pct) if s.fill_entry_avg_pct is not none else '—' }}% vs paper{% else %}from 23 Nov{% endif %}</div></div>
   <div class="stat"><div class="lbl">avg R (stock level)</div><div class="v num">{{ '{:+.2f}'.format(s.avg_r) if s.avg_r is not none else '—' }}</div></div>
 </div>
 
@@ -162,10 +165,11 @@
   <div class="scroll">
   <table>
     <thead>
-      <tr class="grp"><th colspan="4"></th><th colspan="7" style="text-align:center">option premium</th><th colspan="3"></th></tr>
+      <tr class="grp"><th colspan="4"></th><th colspan="7" style="text-align:center">option premium</th><th colspan="3" style="text-align:center" title="Re-quoted from the live order book right after each paper fill: what a real market order would have paid (buy) or got (sell). + = worse than paper.">live fill check</th><th colspan="3"></th></tr>
       <tr>
         <th>Time</th><th class="l">Symbol</th><th class="l">Side</th><th class="l">Contract</th>
         <th>Buy</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th><th>Now / exit</th><th>Opt P&amp;L</th>
+        <th title="Real buy price minus paper buy price, per unit, at 0 s (15 s / 60 s below)">Buy slip</th><th title="Paper sell price minus real sell price, per unit (average of T1/T2/exit)">Sell slip</th><th title="Total rupee difference for this trade, orders at 0 s">Slip ₹</th>
         <th>Stock P&amp;L</th><th class="l">Status</th><th>Lots</th>
       </tr>
     </thead>
@@ -188,6 +192,14 @@
         <td class="num {% if p and p > 0 %}up{% elif p and p < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(p) if p is not none else '—' }}</td>
         {% else %}
         <td class="flat" colspan="7" style="text-align:center">no option prices</td>
+        {% endif %}
+        {% set fv = r.fill %}
+        {% if fv %}
+        <td class="num {% if (fv.entry_0 or 0) > 0 %}down{% elif (fv.entry_0 or 0) < 0 %}up{% endif %}">{{ '{:+.2f}'.format(fv.entry_0) if fv.entry_0 is not none else ('thin book' if fv.entry_thin else '—') }}{% if fv.entry_pct is not none %} <span class="flat">({{ '{:+.1f}'.format(fv.entry_pct) }}%)</span>{% endif %}<div class="flat" style="font-size:11px">15s {{ '{:+.2f}'.format(fv.entry_15) if fv.entry_15 is not none else '—' }} · 60s {{ '{:+.2f}'.format(fv.entry_60) if fv.entry_60 is not none else '—' }}{% if fv.entry_spread is not none %} · spread {{ '{:.2f}'.format(fv.entry_spread) }}{% endif %}</div></td>
+        <td class="num {% if (fv.sell_avg or 0) > 0 %}down{% elif (fv.sell_avg or 0) < 0 %}up{% endif %}">{{ '{:+.2f}'.format(fv.sell_avg) if fv.sell_avg is not none else ('thin book' if fv.sell_thin else '—') }}{% if fv.sell_legs %}<div class="flat" style="font-size:11px">{{ fv.sell_legs }}</div>{% endif %}</td>
+        <td class="num {% if (fv.total_rs or 0) > 0 %}down{% elif (fv.total_rs or 0) < 0 %}up{% endif %}">{{ '{:+,.0f}'.format(fv.total_rs) if fv.total_rs is not none else '—' }}</td>
+        {% else %}
+        <td class="flat" colspan="3" style="text-align:center">—</td>
         {% endif %}
         <td class="num {% if (r.stock_pnl or 0) > 0 %}up{% elif (r.stock_pnl or 0) < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(r.stock_pnl or 0) }}</td>
         <td class="l" title="{{ r.status|status_label }}">{{ r.status }}{% if r.exit_time %} <span class="flat">{{ r.exit_time }}</span>{% endif %}{% if r.why %}<br><span class="flat" style="font-size:11px">{{ r.why }}</span>{% endif %}</td>
