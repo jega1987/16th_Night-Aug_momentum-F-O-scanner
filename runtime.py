@@ -44,6 +44,13 @@ universe = UniverseBuilder(feed)
 def _on_budget_exhausted():
     """Cap reached - stop paying for a feed there is nothing left to act on."""
     stream = getattr(feed, "stream", None)
+    if cfg.ONEHOUR_ENABLED:
+        logger = logging.getLogger("runtime")
+        # The 15m cap doesn't cover the One Hour paper track, which still needs
+        # fresh 5-min candles (20 Nov: after the 13:35 cap its checks fell from
+        # ~30 stocks to 3 for the rest of the day).
+        logger.info("[Budget] 15m cap reached - stream kept for the One Hour track")
+        return
     if stream and cfg.WS_UNSUBSCRIBE_AT_CAP:
         stream.unsubscribe()
 

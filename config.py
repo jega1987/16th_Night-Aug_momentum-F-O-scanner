@@ -254,8 +254,9 @@ class StrategyConfig:
     # Supertrend trailing stop is computed on this timeframe in positional mode.
     POS_TRAIL_TIMEFRAME: str = os.getenv("POS_TRAIL_TIMEFRAME", "15m")
     # Option expiry: in positional mode pick the nearest expiry at least this
-    # many days away, so the option is not decaying fast while held.
-    OPTION_MIN_DTE: int = _int("OPTION_MIN_DTE", 7)
+    # many calendar days away, so the option is not decaying fast while held.
+    # 5 (user rule 20 Nov): roll to next month only when <= 4 days remain.
+    OPTION_MIN_DTE: int = _int("OPTION_MIN_DTE", 5)
     # Cap on positions open at the same time, across days. 0 = no cap.
     MAX_OPEN_POSITIONS: int = _int("MAX_OPEN_POSITIONS", 0)
     # Re-quote each open signal's option every minute and track option P&L.
@@ -382,6 +383,10 @@ class StrategyConfig:
     # Coil memory for the One Hour track, in 1-hour bars after the squeeze
     # ends (7 = about one session). 0 = same as COIL_MEMORY_BARS. (14 Nov 2026)
     ONEHOUR_COIL_MEMORY_BARS: int = _int("ONEHOUR_COIL_MEMORY_BARS", 7)
+    # One Hour track: RSI exhaustion cap (no LONG > 75 / SHORT < 25). Off from
+    # 18 Nov (user OK): 1-year backtest 1h cap off +33.6R / P(loss) 2% vs cap on
+    # +18.2R / 8%. The 15m live scanner keeps RSI_EXHAUSTION_FILTER as set.
+    ONEHOUR_RSI_CAP: bool = _bool("ONEHOUR_RSI_CAP", False)
     # First-break replay options (14 Nov 2026 backtest). Off for the 15m track.
     FIRST_BREAK_FULL_MEMORY: bool = _bool("FIRST_BREAK_FULL_MEMORY", False)
     ONE_BREAK_PER_COIL: bool = _bool("ONE_BREAK_PER_COIL", False)
