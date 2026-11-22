@@ -101,9 +101,52 @@
   footer{border-top:1px solid var(--rule); padding-top:12px; color:var(--faint); font-size:11px}
   .banner{border:1px solid color-mix(in srgb,var(--hold) 45%,transparent); background:color-mix(in srgb,var(--hold) 8%,transparent);
           color:var(--hold); border-radius:3px; padding:9px 12px; margin-bottom:16px; font-size:11.5px}
+  .navrow{display:contents}
   @media (max-width:640px){
-    body{padding:14px 11px 50px} .card .ltp{font-size:21px}
+    body{padding:12px 10px 50px; font-size:13px}
     .scroll{overflow-x:auto; -webkit-overflow-scrolling:touch}
+    /* header: title + pills wrap, the nav buttons become one swipeable row */
+    header{gap:8px; padding-bottom:10px; margin-bottom:12px}
+    .navrow{display:flex; gap:6px; overflow-x:auto; width:100%; padding-bottom:2px;
+            -webkit-overflow-scrolling:touch; scrollbar-width:none}
+    .navrow::-webkit-scrollbar{display:none}
+    .navrow .btn{flex:0 0 auto; padding:8px 12px}
+    input.txt{min-width:0; flex:1}
+    /* index tiles: three across, compact */
+    .grid{grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin-bottom:12px}
+    .card{padding:8px 8px 7px; background-image:none}
+    .card .sym{font-size:10px}
+    .card .top .lbl, .card .top .pill{display:none}
+    .card .ltp{font-size:14px; margin:3px 0 0}
+    .card .chg{font-size:10px}
+    .card .ohl, .gauge .head .lbl{display:none}
+    .gauge{margin-top:6px; padding-top:5px}
+    .gauge .state{font-size:9px; letter-spacing:.04em}
+    .ticks{height:10px} .tick.full,.gauge.fired .tick{height:10px} .tick.on{height:7px}
+    /* stats: neat 3-column grid */
+    .stats{grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; background:var(--rule); margin-bottom:14px}
+    .stat{background:var(--panel); border:0; padding:9px 10px}
+    .stat:last-child:nth-child(3n+2){grid-column:span 2}
+    .stat .v{font-size:16px}
+    /* signals: one card per trade instead of a wide table */
+    .sigtable thead{display:none}
+    .sigtable, .sigtable tbody{display:block}
+    .sigtable tr.sig{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px 10px;
+      grid-template-areas:"sym sym pnl" "side opt time" "buy sl now" "tgt tgt tgt" "status status lots";
+      background:var(--panel); border:1px solid var(--rule); border-radius:4px; padding:11px 12px; margin-top:8px}
+    .sigtable tr.sig td{display:block; padding:0; border:0; text-align:left; white-space:normal}
+    .sigtable td[data-l]::before{content:attr(data-l); display:block; font-size:9px; letter-spacing:.12em;
+      text-transform:uppercase; color:var(--faint); margin-bottom:1px}
+    .sigtable .c-sym{grid-area:sym; font-size:15px; font-weight:600}
+    .sigtable .c-pnl{grid-area:pnl; text-align:right !important; font-size:15px; font-weight:600}
+    .sigtable .c-side{grid-area:side} .sigtable .c-opt{grid-area:opt}
+    .sigtable .c-time{grid-area:time; text-align:right !important; color:var(--muted); font-size:11px}
+    .sigtable .c-buy{grid-area:buy} .sigtable .c-sl{grid-area:sl} .sigtable .c-now{grid-area:now}
+    .sigtable .c-tgt{grid-area:tgt} .sigtable .c-noopt{grid-column:1 / -1; text-align:left}
+    .sigtable .c-status{grid-area:status} .sigtable .c-lots{grid-area:lots; text-align:right !important}
+    .sigtable tr.factors{display:block}
+    .sigtable tr.factors[hidden]{display:none}
+    .sigtable tr.factors td{display:block; padding:8px 4px 4px; border:0}
   }
   @media (prefers-reduced-motion:reduce){*{transition:none !important}}
 </style>
@@ -130,6 +173,7 @@
     <span class="pill {% if w %}live{% else %}off{% endif %}" title="Redis live state">{% if w %}worker live{% else %}worker off{% endif %}{% if ls %} · scan {{ ls.at[11:19] }} in {{ ls.secs }}s{% endif %}</span>
     <button class="btn" id="kill" data-on="{{ 'false' if live.kill_switch else 'true' }}" style="{% if live.kill_switch %}color:var(--short);border-color:var(--short){% endif %}">{% if live.kill_switch %}KILL SWITCH ON - resume{% else %}Kill switch{% endif %}</button>
   {% endif %}
+  <nav class="navrow">
   <a class="btn {% if timeframe=='5m' %}on{% endif %}" href="?tf=5m{% if token %}&token={{ token }}{% endif %}">5m</a>
   <a class="btn {% if timeframe=='15m' %}on{% endif %}" href="?tf=15m{% if token %}&token={{ token }}{% endif %}">15m</a>
   <a class="btn {% if one_hour %}on{% endif %}" href="?tf=1h{% if token %}&token={{ token }}{% endif %}" title="One Hour paper track: squeeze on 1-hour bars">One Hour</a>
@@ -137,6 +181,7 @@
   <a class="btn" href="/performance?tf={{ timeframe }}{% if token %}&token={{ token }}{% endif %}">Analysis</a>
   <a class="btn" href="/watch{% if token %}?token={{ token }}{% endif %}">Watch (Box)</a>
   <button class="btn" id="scan">Scan now</button>
+  </nav>
 </header>
 
 {% if render_error %}
@@ -222,7 +267,7 @@
   <div class="shead"><span class="lbl">signals</span><span class="lbl">tap a row for the factor breakdown</span></div>
   {% if recent_signals %}
   <div class="scroll">
-  <table>
+  <table class="sigtable">
     <thead><tr>
       <th>Time</th><th>Symbol</th><th>Side</th><th>Option</th><th>Buy</th><th>SL</th>
       <th>T1 / T2 / T3</th><th>Now / exit</th><th>Lots</th><th>Status</th><th>Opt P&amp;L</th>
@@ -230,10 +275,10 @@
     <tbody>
     {% for sig in recent_signals %}
       <tr class="sig" data-row="{{ loop.index }}">
-        <td class="num">{{ sig.timestamp.strftime('%d-%m %H:%M') if sig.timestamp else '—' }}</td>
-        <td>{{ sig.symbol }}</td>
-        <td><span class="tag" style="color:{{ 'var(--long)' if sig.direction=='LONG' else 'var(--short)' }}">{{ 'CALL' if sig.direction=='LONG' else 'PUT' }}</span></td>
-        <td>
+        <td class="num c-time">{{ sig.timestamp.strftime('%d-%m %H:%M') if sig.timestamp else '—' }}</td>
+        <td class="c-sym">{{ sig.symbol }}</td>
+        <td class="c-side"><span class="tag" style="color:{{ 'var(--long)' if sig.direction=='LONG' else 'var(--short)' }}">{{ 'CALL' if sig.direction=='LONG' else 'PUT' }}</span></td>
+        <td class="c-opt">
           {% if sig.atm_strike %}<span class="num">{{ sig.atm_strike }} {{ sig.option_type or '' }}</span>{% else %}—{% endif %}
           {% set exp = sig|expiry_label %}{% if exp %}<div class="lbl num" style="text-transform:none;letter-spacing:.02em">exp {{ exp }}</div>{% endif %}
           {% if sig.option_blocked %} <span class="tag" style="color:var(--hold)" title="{{ sig.option_block_reason }}">gate</span>{% endif %}
@@ -241,23 +286,23 @@
         {% if sig.opt_entry %}
         {% set closed = sig.status not in ['OPEN','RUNNING'] %}
         {% set now_px = sig.opt_exit if closed else sig.opt_ltp_now %}
-        <td class="num">{{ '{:,.2f}'.format(sig.opt_entry) }}</td>
-        <td class="num down">{{ '{:,.2f}'.format(sig.opt_sl or 0) }}{% if sig.opt_trail_sl and sig.opt_trail_sl != sig.opt_sl and not closed %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">stop now {{ '{:,.2f}'.format(sig.opt_trail_sl) }}</div>{% endif %}</td>
-        <td class="num">{{ '{:,.1f}'.format(sig.opt_tp1 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp2 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp3 or 0) }}</td>
+        <td class="num c-buy" data-l="Buy">{{ '{:,.2f}'.format(sig.opt_entry) }}</td>
+        <td class="num down c-sl" data-l="SL">{{ '{:,.2f}'.format(sig.opt_sl or 0) }}{% if sig.opt_trail_sl and sig.opt_trail_sl != sig.opt_sl and not closed %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">stop now {{ '{:,.2f}'.format(sig.opt_trail_sl) }}</div>{% endif %}</td>
+        <td class="num c-tgt" data-l="T1 / T2 / T3">{{ '{:,.1f}'.format(sig.opt_tp1 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp2 or 0) }} / {{ '{:,.1f}'.format(sig.opt_tp3 or 0) }}</td>
 {% set ov = sig|option_now %}
-        <td class="num">{% if ov.price %}{{ '{:,.2f}'.format(ov.price) }}{% else %}—{% endif %}
+        <td class="num c-now" data-l="Now / exit">{% if ov.price %}{{ '{:,.2f}'.format(ov.price) }}{% else %}—{% endif %}
           {% if ov.closed %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">{{ ov.note }}</div>
           {% else %}<div class="lbl" style="text-transform:none;letter-spacing:.02em{% if ov.stale %};color:var(--hold){% endif %}">{% if ov.stale %}STALE · {% endif %}{{ ov.note }}</div>{% endif %}</td>
         {% else %}
-        <td class="flat" colspan="4" style="text-align:center">no option prices{% if sig.option_ltp %} · premium {{ sig.option_ltp }}{% endif %}</td>
+        <td class="flat c-noopt" colspan="4" style="text-align:center">no option prices{% if sig.option_ltp %} · premium {{ sig.option_ltp }}{% endif %}</td>
         {% endif %}
-        <td class="num">{{ sig.lots or '—' }}</td>
-        <td title="{{ sig.status|status_label }}">{{ sig.status }}{% if sig.manage_basis == 'option' %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">on premium</div>{% endif %}{% set fbt = sig.factor_breakdown or {} %}{% if fbt.sector_trend == 1 %}<div class="lbl" style="text-transform:none;letter-spacing:.02em;color:var(--long)">sector ✓</div>{% elif fbt.sector_trend == -1 %}<div class="lbl" style="text-transform:none;letter-spacing:.02em;color:var(--short)">sector ✗</div>{% endif %}{% if fbt.adx_low %}<div class="lbl" style="text-transform:none;letter-spacing:.02em;color:var(--hold)">low ADX</div>{% endif %}</td>
+        <td class="num c-lots" data-l="Lots">{{ sig.lots or '—' }}</td>
+        <td class="c-status" title="{{ sig.status|status_label }}">{{ sig.status }}{% if sig.manage_basis == 'option' %}<div class="lbl" style="text-transform:none;letter-spacing:.02em">on premium</div>{% endif %}{% set fbt = sig.factor_breakdown or {} %}{% if fbt.sector_trend == 1 %}<div class="lbl" style="text-transform:none;letter-spacing:.02em;color:var(--long)">sector ✓</div>{% elif fbt.sector_trend == -1 %}<div class="lbl" style="text-transform:none;letter-spacing:.02em;color:var(--short)">sector ✗</div>{% endif %}{% if fbt.adx_low %}<div class="lbl" style="text-transform:none;letter-spacing:.02em;color:var(--hold)">low ADX</div>{% endif %}</td>
         {% set op = sig.opt_pnl if sig.opt_entry else none %}
         {% if op is not none %}
-        <td class="num {% if op > 0 %}up{% elif op < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(op) }}</td>
+        <td class="num c-pnl {% if op > 0 %}up{% elif op < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(op) }}</td>
         {% else %}
-        <td class="num {% if (sig.pnl or 0) > 0 %}up{% elif (sig.pnl or 0) < 0 %}down{% endif %}" title="stock-level P&amp;L (no option data)">{{ '{:+,.0f}'.format(sig.pnl or 0) }}*</td>
+        <td class="num c-pnl {% if (sig.pnl or 0) > 0 %}up{% elif (sig.pnl or 0) < 0 %}down{% endif %}" title="stock-level P&amp;L (no option data)">{{ '{:+,.0f}'.format(sig.pnl or 0) }}*</td>
         {% endif %}
       </tr>
       <tr class="factors" id="f{{ loop.index }}" hidden>
