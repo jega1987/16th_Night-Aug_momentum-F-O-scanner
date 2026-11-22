@@ -505,6 +505,45 @@ class SymbolBacktest:
             t["vix_pct"] = None if p is None else round(p, 1)
             if p is not None and ((vmin is not None and p < vmin) or (vmax is not None and p > vmax)):
                 return "VIX regime"
+        # 22-Nov (user idea): VWAP side and EMA20/50 trend on the squeeze TF.
+        if getattr(cfg, "BT_VWAP", False):
+            if not hasattr(self, "_vwap"):
+                d = self.d5
+                day = pd.to_datetime(d["timestamp"]).dt.date
+                tp = (d["high"] + d["low"] + d["close"]) / 3.0
+                vol = d["volume"].fillna(0).astype(float)
+                cum_pv = (tp * vol).groupby(day).cumsum()
+                cum_v = vol.groupby(day).cumsum()
+                self._vwap = (cum_pv / cum_v.replace(0, np.nan)).values
+            v = self._vwap[i]
+            if v is not None and not np.isnan(v):       # indices have no volume: no VWAP, no gate
+                c = float(self.d5["close"].iloc[i])
+                t["vwap_gap_pct"] = round((c / v - 1) * 100, 2)
+                if (want == 1 and c <= v) or (want == -1 and c >= v):
+                    return "VWAP against entry"
+        if getattr(cfg, "BT_EMA_CROSS", False) and len(self.q15) > 55:
+            if not hasattr(self, "_ema_dir"):
+                cl = self.q15["close"].astype(float)
+                e20 = cl.ewm(span=20, adjust=False).mean()
+                e50 = cl.ewm(span=50, adjust=False).mean()
+                self._ema_dir = np.where(e20 > e50, 1, -1)
+                self._ema_fresh = None
+                n = int(getattr(cfg, "BT_EMA_FRESH_BARS", 0) or 0)
+                if n:
+                    flip = np.r_[False, self._ema_dir[1:] != self._ema_dir[:-1]]
+                    last = np.full(len(flip), -10 ** 9)
+                    k = -10 ** 9
+                    for idx, f in enumerate(flip):
+                        if f:
+                            k = idx
+                        last[idx] = k
+                    self._ema_fresh = (np.arange(len(flip)) - last) <= n
+            j = self._jidx[i]
+            if j >= 50:
+                if int(self._ema_dir[j]) != want:
+                    return "EMA20/50 against entry"
+                if self._ema_fresh is not None and not self._ema_fresh[j]:
+                    return "no fresh EMA20/50 cross"
         if getattr(cfg, "BT_ST_ALIGN", False) and len(self.q15) > cfg.ST_PERIOD + 2:
             if not hasattr(self, "_st_dir"):
                 from indicators import supertrend
@@ -787,6 +826,22 @@ PRESETS = {
         ("1h-live", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True)),
         ("1h-no-rsi-cap", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
                                RSI_EXHAUSTION_FILTER=False)),
+    ],
+    # 22-Nov (user idea): add VWAP and EMA20/50 crossover to both tracks.
+    # EMA on the squeeze timeframe (15m track: 15m bars; One Hour: 1h bars).
+    "vwapema": [
+        ("15m-live", {"SIGNAL_START_TIME": "09:15"}),
+        ("15m-vwap", {"SIGNAL_START_TIME": "09:15", "BT_VWAP": True}),
+        ("15m-ema", {"SIGNAL_START_TIME": "09:15", "BT_EMA_CROSS": True}),
+        ("15m-vwap-ema", {"SIGNAL_START_TIME": "09:15", "BT_VWAP": True, "BT_EMA_CROSS": True}),
+        ("1h-live", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                         RSI_EXHAUSTION_FILTER=False)),
+        ("1h-vwap", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                         RSI_EXHAUSTION_FILTER=False, BT_VWAP=True)),
+        ("1h-ema", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                        RSI_EXHAUSTION_FILTER=False, BT_EMA_CROSS=True)),
+        ("1h-vwap-ema", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                             RSI_EXHAUSTION_FILTER=False, BT_VWAP=True, BT_EMA_CROSS=True)),
     ],
     "sqztf": [
         ("15m-live", {}),
