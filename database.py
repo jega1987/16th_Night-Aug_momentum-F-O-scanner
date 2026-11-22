@@ -178,6 +178,28 @@ class Signal(Base):
 
 
 
+class FillCheck(Base):
+    """What a real order would have filled at, sampled from the live book
+    0-60 s after each paper option fill (fill_check.py, 22 Nov 2026)."""
+    __tablename__ = "fill_checks"
+    id = Column(Integer, primary_key=True)
+    signal_id = Column(Integer, index=True)
+    leg = Column(String)            # ENTRY | T1 | T2 | EXIT
+    side = Column(String)           # BUY | SELL
+    token = Column(Integer)
+    qty = Column(Integer)
+    paper_price = Column(Float)     # premium the paper engine booked
+    paper_at = Column(DateTime)
+    samples = Column(JSON)          # [{sec, at, ltp, bid, ask, fill, slip}]
+    spread_0s = Column(Float)
+    slip_0s = Column(Float)         # rupees per unit, + = worse than paper
+    slip_15s = Column(Float)
+    slip_60s = Column(Float)
+    slip_pct_0s = Column(Float)
+    thin_book = Column(Boolean, default=False)   # top 5 levels couldn't fill the qty
+    created_at = Column(DateTime, default=now_naive)
+
+
 def not_one_hour():
     """Filter: every signal except the One Hour paper track (old rows with no
     timeframe count as main-track)."""

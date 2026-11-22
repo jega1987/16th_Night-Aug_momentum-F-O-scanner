@@ -30,6 +30,17 @@ class SignalEngine:
     def __init__(self, notifier=None, options=None):
         self.notifier = notifier
         self.options = options
+        self._fills = None
+
+    def _fill_checker(self):
+        """Live-fill sampler (fill_check.py); None without a Kite feed."""
+        if self._fills is None:
+            feed = getattr(self, "feed", None) or getattr(self.options, "feed", None)
+            if feed is None:
+                return None
+            from fill_check import FillChecker
+            self._fills = FillChecker(feed)
+        return self._fills
 
     # ------------------------------------------------------------------ #
     def calculate_levels(self, setup: Dict) -> Optional[Dict]:
@@ -284,6 +295,13 @@ class SignalEngine:
                                          "option": payload.get("option_hint")})
         except Exception:
             pass
+        try:
+            fc = self._fill_checker()
+            if fc and payload.get("opt_entry") and payload.get("opt_token"):
+                fc.schedule(payload["id"], "ENTRY", "BUY", payload.get("opt_token"),
+                            payload.get("qty"), payload.get("opt_entry"))
+        except Exception as exc:
+            logger.debug("[Engine] entry fill check skipped: %s", exc)
         try:
             self.after_new_signal()
         except Exception as exc:
@@ -731,6 +749,14 @@ class SignalEngine:
 
     async def _after_step(self, updates: List[Dict]) -> None:
         for s in updates:
+            for ev in s.pop("_fill_events", None) or []:
+                try:
+                    fc = self._fill_checker()
+                    if fc:
+                        fc.schedule(s["id"], ev["leg"], ev["side"], s.get("opt_token"),
+                                    ev["qty"], ev["price"])
+                except Exception as exc:
+                    logger.debug("[Engine] fill check skipped for #%s: %s", s.get("id"), exc)
             if s["status"] in CLOSED_STATUSES:
                 self._pos.pop(s["id"], None)
                 try:
@@ -788,14 +814,17 @@ class SignalEngine:
         q1, q2 = int(qty_total * f1), int(qty_total * f2)
         changed = False
 
-        def book(qty):
+        def book(qty, leg="EXIT"):
             qty = min(qty, s["qty_open"])
+            if qty > 0:
+                s.setdefault("_fill_events", []).append(
+                    {"leg": leg, "side": "SELL", "qty": qty, "price": round(sell, 2)})
             s["opt_realized"] = round(s["opt_realized"] + (sell - fill0) * qty, 2)
             s["realized_pnl"] = s["realized_pnl"] + self._leg_pnl(entry, px, qty, sign)
             s["qty_open"] -= qty
 
         if not s.get("tp1_hit") and trig >= float(s["opt_tp1"]) and q1 > 0:
-            book(q1)
+            book(q1, "T1")
             s["tp1_hit"] = True
             s["status"] = "RUNNING"
             if cfg.MOVE_SL_TO_BE_AFTER_TP1:
@@ -804,7 +833,7 @@ class SignalEngine:
             s["notes"] = f"T1 booked at premium {sell:.2f}, stop to entry premium {fill0:.2f}"
             changed = True
         if s.get("tp1_hit") and not s.get("tp2_hit") and trig >= float(s["opt_tp2"]) and q2 > 0:
-            book(q2)
+            book(q2, "T2")
             s["tp2_hit"] = True
             s["opt_trail_sl"] = max(float(s.get("opt_trail_sl") or s["opt_sl"]), float(s["opt_tp1"]))
             s["trail_sl"] = s["tp1"]

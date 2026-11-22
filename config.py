@@ -254,6 +254,9 @@ class StrategyConfig:
     MAX_OPEN_POSITIONS: int = _int("MAX_OPEN_POSITIONS", 0)
     # Re-quote each open signal's option every minute and track option P&L.
     OPTION_TRACKING: bool = _bool("OPTION_TRACKING", True)
+    # Re-quote the option book 0/5/15/30/60 s after each paper fill and record
+    # what a real market order would have got (fill_check.py, 22 Nov).
+    FILL_CHECK_ENABLED: bool = _bool("FILL_CHECK_ENABLED", True)
     # Paper fills at the touch: buy at the best ask, sell at the best bid
     # (what a market order would actually get), instead of the bid/ask mid.
     OPTION_FILL_AT_TOUCH: bool = _bool("OPTION_FILL_AT_TOUCH", True)
