@@ -59,7 +59,51 @@
   .hit{color:var(--long)}
   .empty{border:1px dashed var(--rule); border-radius:3px; padding:22px; text-align:center; color:var(--muted)}
   footer{border-top:1px solid var(--rule); padding-top:12px; color:var(--faint); font-size:11px}
-  @media (max-width:640px){ body{padding:14px 11px 50px} .stat .v{font-size:16px} .chartwrap{height:220px} }
+  .navrow{display:contents}
+  .filterbox > summary{display:none}
+  @media (max-width:640px){
+    body{padding:12px 10px 50px}
+    header{gap:8px; padding-bottom:10px; margin-bottom:12px}
+    .navrow{display:flex; gap:6px; overflow-x:auto; width:100%; scrollbar-width:none; -webkit-overflow-scrolling:touch}
+    .navrow::-webkit-scrollbar{display:none}
+    .navrow .btn{flex:0 0 auto; padding:8px 12px}
+    /* filters fold away behind one button */
+    .filterbox{margin-bottom:12px}
+    .filterbox > summary{display:inline-block; list-style:none; margin-bottom:8px}
+    .filterbox > summary::-webkit-details-marker{display:none}
+    .filterbox > summary::after{content:" ▾"}
+    .filterbox[open] > summary::after{content:" ▴"}
+    form.filters{grid-template-columns:1fr 1fr; gap:8px; padding:10px}
+    .actions{grid-column:1 / -1}
+    .actions .btn{flex:1; text-align:center; padding:9px}
+    /* stats: tidy 3-column grid */
+    .stats{grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; background:var(--rule)}
+    .stat{background:var(--panel); border:0; padding:9px 10px}
+    .stat .v{font-size:15px} .stat .s{font-size:10px}
+    .stat:last-child:nth-child(3n+1){grid-column:1 / -1}
+    .stat:last-child:nth-child(3n+2){grid-column:span 2}
+    .chartwrap{height:200px}
+    /* signals: one card per trade */
+    .sigtable thead{display:none}
+    .sigtable, .sigtable tbody{display:block}
+    .sigtable tr.sig{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:7px 10px;
+      grid-template-areas:"sym sym pnl" "side opt time" "buy sl now" "t1 t2 t3" "bslip sslip slip" "status status spnl";
+      background:var(--panel); border:1px solid var(--rule); border-radius:4px; padding:11px 12px; margin-top:8px}
+    .sigtable tr.sig td{display:block; padding:0; border:0; text-align:left; white-space:normal}
+    .sigtable td[data-l]::before{content:attr(data-l); display:block; font-size:9px; letter-spacing:.12em;
+      text-transform:uppercase; color:var(--faint); margin-bottom:1px}
+    .sigtable .c-sym{grid-area:sym; font-size:15px; font-weight:600}
+    .sigtable .c-pnl{grid-area:pnl; text-align:right !important; font-size:15px; font-weight:600}
+    .sigtable .c-pnl::before{content:"option P&L"; display:block; font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--faint); font-weight:400}
+    .sigtable .c-side{grid-area:side} .sigtable .c-opt{grid-area:opt}
+    .sigtable .c-time{grid-area:time; text-align:right !important; color:var(--muted); font-size:11px}
+    .sigtable .c-buy{grid-area:buy} .sigtable .c-sl{grid-area:sl} .sigtable .c-now{grid-area:now}
+    .sigtable .c-t1{grid-area:t1} .sigtable .c-t2{grid-area:t2} .sigtable .c-t3{grid-area:t3}
+    .sigtable .c-bslip{grid-area:bslip} .sigtable .c-sslip{grid-area:sslip} .sigtable .c-slip{grid-area:slip; text-align:right !important}
+    .sigtable .c-noopt, .sigtable .c-nofill{grid-column:1 / -1; text-align:left}
+    .sigtable .c-status{grid-area:status} .sigtable .c-spnl{grid-area:spnl; text-align:right !important}
+    .sigtable .c-lots{display:none !important}
+  }
 </style>
 </head>
 <body>
@@ -70,13 +114,18 @@
   <h1>Signals &amp; P&amp;L{% if f.strategy == '1h' %} <span style="font-weight:400">/ One Hour (paper)</span>{% endif %}</h1>
   <span class="lbl">{{ 'option premium' if f.basis == 'option' else 'stock / futures level' }} basis</span>
   <div class="spacer"></div>
+  <nav class="navrow">
   <a class="btn {% if f.strategy != '1h' %}on{% endif %}" href="/pnl?strategy=15m{{ tq }}">15 Min</a>
   <a class="btn {% if f.strategy == '1h' %}on{% endif %}" href="/pnl?strategy=1h{{ tq }}">One Hour</a>
   <a class="btn" href="/?{% if f.strategy == '1h' %}tf=1h{% endif %}{{ tq }}">Live</a>
   <a class="btn" href="/performance?{{ tq[1:] }}">Analysis</a>
   <a class="btn" href="/watch?{{ tq[1:] }}">Watch (Box)</a>
   <a class="btn" href="/api/export.csv?days=3650{{ tq }}">CSV</a>
+  </nav>
 </header>
+
+<details class="filterbox" id="filterbox" open>
+<summary class="btn">Filters</summary>
 
 <form class="filters" method="get" action="/pnl">
   {% if token %}<input type="hidden" name="token" value="{{ token }}">{% endif %}
@@ -124,6 +173,7 @@
     <a class="btn" href="/pnl?{{ tq[1:] }}">Reset</a>
   </div>
 </form>
+</details>
 
 {% for e in f.errors %}<div class="banner">{{ e }}</div>{% endfor %}
 {% if f.basis == 'option' and s.without_option_data %}
@@ -163,7 +213,7 @@
   <div class="shead"><span class="lbl">signals ({{ rows|length }})</span><span class="lbl">option prices are premiums per unit · SL/T1–T3 premiums are estimates</span></div>
   {% if rows %}
   <div class="scroll">
-  <table>
+  <table class="sigtable">
     <thead>
       <tr class="grp"><th colspan="4"></th><th colspan="7" style="text-align:center">option premium</th><th colspan="3" style="text-align:center" title="Re-quoted from the live order book right after each paper fill: what a real market order would have paid (buy) or got (sell). + = worse than paper.">live fill check</th><th colspan="3"></th></tr>
       <tr>
@@ -176,34 +226,34 @@
     <tbody>
     {% for r in rows %}
       {% set p = r.opt_pnl %}
-      <tr title="{{ r.notes or '' }}">
-        <td class="num">{{ r.time or '—' }}</td>
-        <td class="l">{{ r.symbol }}</td>
-        <td class="l"><span class="tag" style="color:{{ 'var(--long)' if r.side=='CALL' else 'var(--short)' }}">{{ r.side }}</span></td>
-        <td class="l num">{{ r.contract or '—' }}{% set exp = r|expiry_label %}{% if exp %}<div class="flat" style="font-size:11px">exp {{ exp }}</div>{% endif %}</td>
+      <tr class="sig" title="{{ r.notes or '' }}">
+        <td class="num c-time">{{ r.time or '—' }}</td>
+        <td class="l c-sym">{{ r.symbol }}</td>
+        <td class="l c-side"><span class="tag" style="color:{{ 'var(--long)' if r.side=='CALL' else 'var(--short)' }}">{{ r.side }}</span></td>
+        <td class="l num c-opt">{{ r.contract or '—' }}{% set exp = r|expiry_label %}{% if exp %}<div class="flat" style="font-size:11px">exp {{ exp }}</div>{% endif %}</td>
         {% if r.opt_entry %}
-        <td class="num">{{ '{:,.2f}'.format(r.opt_entry) }}</td>
-        <td class="num down">{{ '{:,.2f}'.format(r.opt_sl) if r.opt_sl else '—' }}</td>
-        <td class="num {% if r.tp1_hit %}hit{% endif %}">{{ '{:,.2f}'.format(r.opt_tp1) if r.opt_tp1 else '—' }}</td>
-        <td class="num {% if r.tp2_hit %}hit{% endif %}">{{ '{:,.2f}'.format(r.opt_tp2) if r.opt_tp2 else '—' }}</td>
-        <td class="num {% if r.status=='TP3' %}hit{% endif %}">{{ '{:,.2f}'.format(r.opt_tp3) if r.opt_tp3 else '—' }}</td>
+        <td class="num c-buy" data-l="Buy">{{ '{:,.2f}'.format(r.opt_entry) }}</td>
+        <td class="num down c-sl" data-l="SL">{{ '{:,.2f}'.format(r.opt_sl) if r.opt_sl else '—' }}</td>
+        <td class="num c-t1 {% if r.tp1_hit %}hit{% endif %}" data-l="T1">{{ '{:,.2f}'.format(r.opt_tp1) if r.opt_tp1 else '—' }}</td>
+        <td class="num c-t2 {% if r.tp2_hit %}hit{% endif %}" data-l="T2">{{ '{:,.2f}'.format(r.opt_tp2) if r.opt_tp2 else '—' }}</td>
+        <td class="num c-t3 {% if r.status=='TP3' %}hit{% endif %}" data-l="T3">{{ '{:,.2f}'.format(r.opt_tp3) if r.opt_tp3 else '—' }}</td>
 {% set ov = r.opt_view or {} %}
-        <td class="num">{{ '{:,.2f}'.format(ov.price) if ov.price else '—' }}{% if ov.note %}<div class="flat" style="font-size:11px{% if ov.stale %};color:var(--hold){% endif %}">{% if ov.stale %}STALE · {% endif %}{{ ov.note }}</div>{% endif %}</td>
-        <td class="num {% if p and p > 0 %}up{% elif p and p < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(p) if p is not none else '—' }}</td>
+        <td class="num c-now" data-l="Now / exit">{{ '{:,.2f}'.format(ov.price) if ov.price else '—' }}{% if ov.note %}<div class="flat" style="font-size:11px{% if ov.stale %};color:var(--hold){% endif %}">{% if ov.stale %}STALE · {% endif %}{{ ov.note }}</div>{% endif %}</td>
+        <td class="num c-pnl {% if p and p > 0 %}up{% elif p and p < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(p) if p is not none else '—' }}</td>
         {% else %}
-        <td class="flat" colspan="7" style="text-align:center">no option prices</td>
+        <td class="flat c-noopt" colspan="7" style="text-align:center">no option prices</td>
         {% endif %}
         {% set fv = r.fill %}
         {% if fv %}
-        <td class="num {% if (fv.entry_0 or 0) > 0 %}down{% elif (fv.entry_0 or 0) < 0 %}up{% endif %}">{{ '{:+.2f}'.format(fv.entry_0) if fv.entry_0 is not none else ('thin book' if fv.entry_thin else '—') }}{% if fv.entry_pct is not none %} <span class="flat">({{ '{:+.1f}'.format(fv.entry_pct) }}%)</span>{% endif %}<div class="flat" style="font-size:11px">15s {{ '{:+.2f}'.format(fv.entry_15) if fv.entry_15 is not none else '—' }} · 60s {{ '{:+.2f}'.format(fv.entry_60) if fv.entry_60 is not none else '—' }}{% if fv.entry_spread is not none %} · spread {{ '{:.2f}'.format(fv.entry_spread) }}{% endif %}</div></td>
-        <td class="num {% if (fv.sell_avg or 0) > 0 %}down{% elif (fv.sell_avg or 0) < 0 %}up{% endif %}">{{ '{:+.2f}'.format(fv.sell_avg) if fv.sell_avg is not none else ('thin book' if fv.sell_thin else '—') }}{% if fv.sell_legs %}<div class="flat" style="font-size:11px">{{ fv.sell_legs }}</div>{% endif %}</td>
-        <td class="num {% if (fv.total_rs or 0) > 0 %}down{% elif (fv.total_rs or 0) < 0 %}up{% endif %}">{{ '{:+,.0f}'.format(fv.total_rs) if fv.total_rs is not none else '—' }}</td>
+        <td class="num c-bslip {% if (fv.entry_0 or 0) > 0 %}down{% elif (fv.entry_0 or 0) < 0 %}up{% endif %}" data-l="Buy slip">{{ '{:+.2f}'.format(fv.entry_0) if fv.entry_0 is not none else ('thin book' if fv.entry_thin else '—') }}{% if fv.entry_pct is not none %} <span class="flat">({{ '{:+.1f}'.format(fv.entry_pct) }}%)</span>{% endif %}<div class="flat" style="font-size:11px">15s {{ '{:+.2f}'.format(fv.entry_15) if fv.entry_15 is not none else '—' }} · 60s {{ '{:+.2f}'.format(fv.entry_60) if fv.entry_60 is not none else '—' }}{% if fv.entry_spread is not none %} · spread {{ '{:.2f}'.format(fv.entry_spread) }}{% endif %}</div></td>
+        <td class="num c-sslip {% if (fv.sell_avg or 0) > 0 %}down{% elif (fv.sell_avg or 0) < 0 %}up{% endif %}" data-l="Sell slip">{{ '{:+.2f}'.format(fv.sell_avg) if fv.sell_avg is not none else ('thin book' if fv.sell_thin else '—') }}{% if fv.sell_legs %}<div class="flat" style="font-size:11px">{{ fv.sell_legs }}</div>{% endif %}</td>
+        <td class="num c-slip {% if (fv.total_rs or 0) > 0 %}down{% elif (fv.total_rs or 0) < 0 %}up{% endif %}" data-l="Slip ₹">{{ '{:+,.0f}'.format(fv.total_rs) if fv.total_rs is not none else '—' }}</td>
         {% else %}
-        <td class="flat" colspan="3" style="text-align:center">—</td>
+        <td class="flat c-nofill" colspan="3" style="text-align:center">—</td>
         {% endif %}
-        <td class="num {% if (r.stock_pnl or 0) > 0 %}up{% elif (r.stock_pnl or 0) < 0 %}down{% endif %}">{{ '{:+,.0f}'.format(r.stock_pnl or 0) }}</td>
-        <td class="l" title="{{ r.status|status_label }}">{{ r.status }}{% if r.exit_time %} <span class="flat">{{ r.exit_time }}</span>{% endif %}{% if r.why %}<br><span class="flat" style="font-size:11px">{{ r.why }}</span>{% endif %}</td>
-        <td class="num">{{ r.lots or '—' }}</td>
+        <td class="num c-spnl {% if (r.stock_pnl or 0) > 0 %}up{% elif (r.stock_pnl or 0) < 0 %}down{% endif %}" data-l="Stock P&amp;L">{{ '{:+,.0f}'.format(r.stock_pnl or 0) }}</td>
+        <td class="l c-status" title="{{ r.status|status_label }}">{{ r.status }}{% if r.exit_time %} <span class="flat">{{ r.exit_time }}</span>{% endif %}{% if r.why %}<br><span class="flat" style="font-size:11px">{{ r.why }}</span>{% endif %}</td>
+        <td class="num c-lots" data-l="Lots">{{ r.lots or '—' }}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -217,6 +267,9 @@
 <footer>{{ now }} · paper signals only, no orders are placed · option SL/target premiums are model estimates at signal time · not investment advice</footer>
 
 <script>
+  (function(){
+    try { if (window.matchMedia('(max-width:640px)').matches) document.getElementById('filterbox').removeAttribute('open'); } catch(e){}
+  })();
   (function(){
     var period = document.getElementById('period');
     function toggle(){ document.querySelectorAll('.custom').forEach(function(el){
