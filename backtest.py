@@ -452,10 +452,14 @@ class SymbolBacktest:
                     stop = max(stop, sl_) if long_side else min(stop, sl_)
 
             # 4. time stop (and the experimental same-day exit)
-            if self.no_time:
-                continue
             held = MarketClock.trading_days_between(entry_day, close_ts.date())
             at_bell = close_ts.time() >= self.exit_t
+            # Live rule 25 Nov (both tracks): no T1 by 15:20 on the signal day -> close.
+            if getattr(cfg, "BT_EXIT_SAMEDAY_NO_T1", False) and not tp1_hit and (held > 0 or at_bell):
+                exit_price, reason, k_exit = c, "same-day close (no T1)", k
+                break
+            if self.no_time:
+                continue
             if getattr(cfg, "BT_EXIT_EOD", False) and at_bell:
                 exit_price, reason, k_exit = c, "eod square-off", k
                 break
@@ -544,6 +548,26 @@ class SymbolBacktest:
                     return "EMA20/50 against entry"
                 if self._ema_fresh is not None and not self._ema_fresh[j]:
                     return "no fresh EMA20/50 cross"
+        # 25-Nov (INDHOTEL): the entry candle must close in the trade direction.
+        if getattr(cfg, "BT_ENTRY_CANDLE_DIR", False):
+            o, c = float(self.d5["open"].iloc[i]), float(self.d5["close"].iloc[i])
+            if (want == 1 and c <= o) or (want == -1 and c >= o):
+                return "entry candle against direction"
+        # 25-Nov (INDHOTEL): once RSI was stretched (> RSI_LONG_MAX / < RSI_SHORT_MIN)
+        # in the last BREAKOUT_VALID_BARS 5-min bars of this session, the
+        # breakout is used up - no entry when RSI later cools.
+        if getattr(cfg, "BT_STRETCH_USED", False):
+            if not hasattr(self, "_rsi5"):
+                from indicators import rsi as _rsi
+                self._rsi5 = _rsi(self.d5["close"].astype(float), cfg.RSI_LENGTH).values
+                self._day5 = pd.to_datetime(self.d5["timestamp"]).dt.date.values
+            n_back = int(getattr(cfg, "BREAKOUT_VALID_BARS", 6) or 6)
+            for k in range(max(0, i - n_back), i):
+                if self._day5[k] != self._day5[i]:
+                    continue
+                r = self._rsi5[k]
+                if (want == 1 and r > cfg.RSI_LONG_MAX) or (want == -1 and r < cfg.RSI_SHORT_MIN):
+                    return "breakout already stretched earlier"
         if getattr(cfg, "BT_ST_ALIGN", False) and len(self.q15) > cfg.ST_PERIOD + 2:
             if not hasattr(self, "_st_dir"):
                 from indicators import supertrend
@@ -842,6 +866,31 @@ PRESETS = {
                         RSI_EXHAUSTION_FILTER=False, BT_EMA_CROSS=True)),
         ("1h-vwap-ema", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
                              RSI_EXHAUSTION_FILTER=False, BT_VWAP=True, BT_EMA_CROSS=True)),
+    ],
+    # 25-Nov (INDHOTEL entry at the first red candle after RSI cooled).
+    # All variants use the live same-day exit (no T1 by 15:20 -> close).
+    "entryfix": [
+        ("15m-live-old", {"SIGNAL_START_TIME": "09:15"}),
+        ("15m-live", {"SIGNAL_START_TIME": "09:15", "BT_EXIT_SAMEDAY_NO_T1": True}),
+        ("15m-candle", {"SIGNAL_START_TIME": "09:15", "BT_EXIT_SAMEDAY_NO_T1": True,
+                        "BT_ENTRY_CANDLE_DIR": True}),
+        ("15m-stretch", {"SIGNAL_START_TIME": "09:15", "BT_EXIT_SAMEDAY_NO_T1": True,
+                         "BT_STRETCH_USED": True}),
+        ("15m-both", {"SIGNAL_START_TIME": "09:15", "BT_EXIT_SAMEDAY_NO_T1": True,
+                      "BT_ENTRY_CANDLE_DIR": True, "BT_STRETCH_USED": True}),
+        ("1h-live-old", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                             RSI_EXHAUSTION_FILTER=False)),
+        ("1h-live", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                         RSI_EXHAUSTION_FILTER=False, BT_EXIT_SAMEDAY_NO_T1=True)),
+        ("1h-candle", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                           RSI_EXHAUSTION_FILTER=False, BT_EXIT_SAMEDAY_NO_T1=True,
+                           BT_ENTRY_CANDLE_DIR=True)),
+        ("1h-stretch", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                            RSI_EXHAUSTION_FILTER=False, BT_EXIT_SAMEDAY_NO_T1=True,
+                            BT_STRETCH_USED=True)),
+        ("1h-both", dict(_ONE_HOUR, COIL_MEMORY_BARS=7, FIRST_BREAK_FULL_MEMORY=True,
+                         RSI_EXHAUSTION_FILTER=False, BT_EXIT_SAMEDAY_NO_T1=True,
+                         BT_ENTRY_CANDLE_DIR=True, BT_STRETCH_USED=True)),
     ],
     "sqztf": [
         ("15m-live", {}),
