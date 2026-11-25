@@ -248,6 +248,10 @@ class StrategyConfig:
     # Only signals from this date are affected (open trades from before keep
     # the old rules instead of being closed at the next open).
     POS_SAME_DAY_EXIT_FROM: str = os.getenv("POS_SAME_DAY_EXIT_FROM", "2026-11-25")
+    # Same rule on the One Hour paper track (user, 25 Nov 08:19). Its max-hold
+    # limit stays off; only the "no T1 by 15:20 on the signal day" close applies.
+    POS_SAME_DAY_EXIT_ONE_HOUR: bool = _bool("POS_SAME_DAY_EXIT_ONE_HOUR", True)
+    POS_SAME_DAY_EXIT_1H_FROM: str = os.getenv("POS_SAME_DAY_EXIT_1H_FROM", "2026-11-25")
     # Overnight-sized stop: one more candidate in the stop placement,
     # POS_SL_ATR_MULT x ATR on POS_SL_ATR_TIMEFRAME bars (widest still wins).
     POS_SL_ATR_TIMEFRAME: str = os.getenv("POS_SL_ATR_TIMEFRAME", "60m")
