@@ -240,6 +240,14 @@ class StrategyConfig:
     POS_MAX_HOLD_DAYS: int = _int("POS_MAX_HOLD_DAYS", 3)
     POS_EXIT_TIME: str = os.getenv("POS_EXIT_TIME", "15:20")
     POS_EXIT_DAYS_BEFORE_EXPIRY: int = _int("POS_EXIT_DAYS_BEFORE_EXPIRY", 1)
+    # 15m track (user rule 25 Nov): a CALL/PUT that hasn't performed on its
+    # signal day - T1 not reached - is closed at POS_EXIT_TIME that same day.
+    # Trades that reached T1 carry on with the trail as before. One Hour paper
+    # track is not affected.
+    POS_SAME_DAY_EXIT_NO_T1: bool = _bool("POS_SAME_DAY_EXIT_NO_T1", True)
+    # Only signals from this date are affected (open trades from before keep
+    # the old rules instead of being closed at the next open).
+    POS_SAME_DAY_EXIT_FROM: str = os.getenv("POS_SAME_DAY_EXIT_FROM", "2026-11-25")
     # Overnight-sized stop: one more candidate in the stop placement,
     # POS_SL_ATR_MULT x ATR on POS_SL_ATR_TIMEFRAME bars (widest still wins).
     POS_SL_ATR_TIMEFRAME: str = os.getenv("POS_SL_ATR_TIMEFRAME", "60m")

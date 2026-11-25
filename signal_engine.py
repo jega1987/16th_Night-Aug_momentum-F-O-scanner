@@ -921,6 +921,13 @@ class SignalEngine:
         # One Hour track: no holding-period limit (data-based exits only).
         if opened is not None and s.get("timeframe") != ONE_HOUR_TF:
             held = MarketClock.trading_days_between(pd.Timestamp(opened).date(), now.date())
+            # User rule 25 Nov: not performed on the signal day (T1 not hit) ->
+            # close at POS_EXIT_TIME the same day. A missed bell (worker down)
+            # closes at the next check.
+            if (cfg.POS_SAME_DAY_EXIT_NO_T1 and not s.get("tp1_hit")
+                    and str(pd.Timestamp(opened).date()) >= cfg.POS_SAME_DAY_EXIT_FROM
+                    and (held > 0 or at_bell)):
+                return "Not performed on the signal day (T1 not reached) - closed same day"
             if held > cfg.POS_MAX_HOLD_DAYS or (held == cfg.POS_MAX_HOLD_DAYS and at_bell):
                 return f"Max holding period of {cfg.POS_MAX_HOLD_DAYS} trading days reached"
 
